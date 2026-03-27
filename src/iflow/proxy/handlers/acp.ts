@@ -4,6 +4,26 @@ import { IFlowClient, PermissionMode, MessageType, ToolCallStatus } from '@iflow
 import * as logger from '../../../plugin/logger.js'
 import { log } from '../utils.js'
 import type { ChatCompletionRequest, StreamChunk } from '../types.js'
+import fs from 'fs'
+import path from 'path'
+import os from 'os'
+
+// User requested debug logs in ~/.config/opencode/iflow-logs
+const LOG_DIR = path.join(os.homedir(), '.config', 'opencode', 'iflow-logs')
+if (!fs.existsSync(LOG_DIR)) {
+  fs.mkdirSync(LOG_DIR, { recursive: true })
+}
+const ACP_LOG_FILE = path.join(LOG_DIR, 'acp-proxy.log')
+
+function fileLog(message: string) {
+  const timestamp = new Date().toISOString()
+  const line = `[${timestamp}] ${message}\n`
+  try {
+    fs.appendFileSync(ACP_LOG_FILE, line)
+  } catch (e) {
+    console.error('Failed to write to acp-proxy.log', e)
+  }
+}
 
 // Tools internas de iflow que deben ser desactivadas para usar las de OpenCode
 const IFLOW_INTERNAL_TOOLS = [
@@ -22,26 +42,17 @@ const IFLOW_INTERNAL_TOOLS = [
   'search_files',
   'file_search',
   'computer_use',
+  'bash',
+  'sh',
+  'python',
+  'edit',
+  'sed',
+  'grep'
 ]
 
-// Store active ACP clients — keyed by model+toolsHash para detectar cambios
-const acpClients = new Map<string, { client: IFlowClient; toolsHash: string }>()
+// Store active ACP clients by model
+const acpClients = new Map<string, IFlowClient>()
 
-// Track tool call indices for proper OpenAI format
-let toolCallIndex = 0
-
-/**
- * Hash simple de las tools para detectar cambios de sesión
- */
-function hashTools(tools: any[]): string {
-  if (!tools || tools.length === 0) return 'no-tools'
-  return tools.map(t => t.function?.name || t.name || '').sort().join(',')
-}
-
-/**
- * Construye un append_system_prompt con las definiciones de tools de OpenCode
- * para que glm-5 use exactamente esos nombres en sus tool_calls
- */
 function buildToolsSystemPrompt(tools: any[]): string {
   if (!tools || tools.length === 0) return ''
   
@@ -52,82 +63,66 @@ function buildToolsSystemPrompt(tools: any[]): string {
     
     const paramsList = Object.entries(params).map(([name, schema]: [string, any]) => {
       const req = required.includes(name) ? ' (required)' : ' (optional)'
-      return `  - ${name}: ${schema.type || 'string'}${req} — ${schema.description || ''}`
+      return `  - "${name}": ${schema.type || 'string'}${req} — ${schema.description || ''}`
     }).join('\n')
     
-    return `### ${fn.name}\n${fn.description || ''}\nParameters:\n${paramsList || '  (none)'}`
+    return `### ${fn.name}\n${fn.description || ''}\nParameters JSON Map:\n${paramsList || '  (none)'}`
   }).join('\n\n')
 
-  return `\n\n## IMPORTANT: Tool Use Instructions\n\nYou MUST use ONLY the following tools. Do NOT use any other tool names.\nCall these tools using their EXACT names as listed below:\n\n${toolDefs}\n\nNever use: read_text_file, write_to_file, list_directory, directory_tree, todo_write, execute_command, or any other tool not listed above.`
+  return `\n\n## IMPORTANT: External Tool Usage
+You have access to external tools executed by OpenCode (the editor). DO NOT USE ANY INTERNAL TOOLS like read_text_file or execute_command.
+Available Tools:
+${toolDefs}
+
+To execute an external tool, you MUST use the native tool calling capability or output exact text in the following format and then STOP immediately:
+<<USA_TOOL>>{"name": "TOOL_NAME", "arguments": {"param1": "value1"}}<</USA_TOOL>>
+
+Example:
+<<USA_TOOL>>{"name": "read", "arguments": {"path": "src/index.ts"}}<</USA_TOOL>>
+`
 }
 
 /**
- * Get or create an ACP client for a specific model + tools combination
+ * Get or create an ACP client for a specific model
  */
-async function getACPClient(model: string, tools: any[]): Promise<IFlowClient> {
-  const toolsHash = hashTools(tools)
-  const cacheKey = model
-  const cached = acpClients.get(cacheKey)
+async function getACPClient(model: string, tools: any[], isNewChat: boolean): Promise<IFlowClient> {
+  let client = acpClients.get(model)
   
-  // Reusar cliente si el hash de tools no cambió
-  if (cached && cached.client.isConnected() && cached.toolsHash === toolsHash) {
-    return cached.client
+  // Restart if requested (e.g., new chat session in OpenCode)
+  if (isNewChat && client) {
+    fileLog(`Restarting ACP client for model ${model} due to new chat session`)
+    try { await client.disconnect() } catch {}
+    client = undefined
+  }
+
+  if (client && client.isConnected()) {
+    return client
   }
   
-  // Desconectar cliente anterior si existe
-  if (cached) {
-    try { await cached.client.disconnect() } catch {}
-  }
-  
-  log(`Creating new ACP client for model: ${model} (tools: ${toolsHash})`)
+  fileLog(`Creating new ACP client for model: ${model}`)
   
   const appendPrompt = buildToolsSystemPrompt(tools)
-  
-  const client = new IFlowClient({
-    permissionMode: PermissionMode.AUTO,
+
+  client = new IFlowClient({
+    permissionMode: PermissionMode.MANUAL,
     autoStartProcess: true,
     logLevel: 'ERROR',
     sessionSettings: {
-      permission_mode: 'yolo',
-      // Desactivar tools internas de iflow
       disallowed_tools: IFLOW_INTERNAL_TOOLS,
-      // Inyectar definiciones de tools de OpenCode al system prompt
-      ...(appendPrompt ? { append_system_prompt: appendPrompt } : {}),
+      ...(appendPrompt ? { append_system_prompt: appendPrompt } : {})
     }
   })
   
   await client.connect()
   
-  // Set the model if specified
   try {
     await client.config.set('model', model)
-    log(`Model set to: ${model}`)
-  } catch (err) {
-    log(`Warning: Could not set model: ${err}`)
-  }
+  } catch (err) {}
   
-  acpClients.set(cacheKey, { client, toolsHash })
+  acpClients.set(model, client)
   return client
 }
 
-/**
- * Convert ACP ToolCallMessage to OpenAI tool_calls format
- */
-function convertToolCallToOpenAI(message: any): any {
-  return {
-    index: toolCallIndex++,
-    id: message.id || `call_${randomUUID()}`,
-    type: 'function' as const,
-    function: {
-      name: message.toolName || message.label || 'unknown_tool',
-      arguments: JSON.stringify(message.args || {})
-    }
-  }
-}
-
-/**
- * Handle streaming request using ACP protocol
- */
 export async function handleACPStreamRequest(
   request: ChatCompletionRequest,
   res: ServerResponse,
@@ -142,213 +137,298 @@ export async function handleACPStreamRequest(
   const chatId = `iflow-${randomUUID()}`
   const created = Math.floor(Date.now() / 1000)
   
-  // Reset tool call index for new request
-  toolCallIndex = 0
-
-  // Build the prompt from messages
-  const userMessages = request.messages.filter(m => m.role === 'user')
-  const lastUserMessage = userMessages[userMessages.length - 1]
-  const promptText = typeof lastUserMessage?.content === 'string' 
-    ? lastUserMessage.content 
-    : ''
-
   const tools = request.tools || []
+  
+  // Determine if this is a new chat (only system and max 1 user msg)
+  const isNewChat = request.messages.length <= 2 
+  const client = await getACPClient(request.model, tools, isNewChat)
+  
+  // Figure out what text to send to the iFlow CLI stateful session
+  const lastMessage = request.messages.length > 0 ? request.messages[request.messages.length - 1] : null
+  const prevMessage = request.messages.length > 1 ? request.messages[request.messages.length - 2] : null
+
+  let sendText = ''
+  
+  if (lastMessage && lastMessage.role === 'tool') {
+    // This is a tool execution result from OpenCode!
+    const toolCallName = (lastMessage as any).name || 'tool'
+    sendText = `[Tool Execution Result for ${toolCallName}]\n${lastMessage.content}`
+  } else if (lastMessage && lastMessage.role === 'user') {
+    sendText = typeof lastMessage.content === 'string' ? lastMessage.content : ''
+    
+    // Safety check: if there is a tool result but user appended a new message right after
+    if (prevMessage && prevMessage.role === 'tool') {
+      const toolCallName = (prevMessage as any).name || 'tool'
+      sendText = `[Tool Execution Result for ${toolCallName}]\n${prevMessage.content}\n\nUser: ${sendText}`
+    }
+  }
+
+  if (!sendText) sendText = "Continue."
 
   try {
-    // Pasar tools al cliente para que iflow inyecte el system prompt correcto
-    const client = await getACPClient(request.model, tools)
-    
-    if (enableLog) {
-      logger.log(`[IFlowACP] [Request] model=${request.model} tools=${tools.length} prompt=${promptText.substring(0, 100)}...`)
-    }
+    fileLog(`[REQ] model=${request.model} msgLen=${request.messages.length} sendText=${sendText.substring(0, 100)}`)
+    if (enableLog) logger.log(`[IFlowACP] Sending text to CLI: ${sendText.substring(0, 100)}...`)
+    await client.sendMessage(sendText)
 
-    // Send the message
-    await client.sendMessage(promptText)
+    // Buffers for parsing
+    let contentBuffer = ''
+    let isExtractingTool = false
+    let toolString = ''
 
-    // Track current tool call
-    let currentToolCall: any = null
-
-    // Process messages
     for await (const message of client.receiveMessages()) {
-      if (enableLog) {
-        logger.log(`[IFlowACP] [Message] type=${message.type}`)
-      }
-
-      const delta: any = {}
-
       switch (message.type) {
         case MessageType.ASSISTANT:
-          // Handle assistant message (content or thought)
           const assistantMsg = message as any
           if (assistantMsg.chunk?.thought) {
-            // This is reasoning content
-            delta.reasoning_content = assistantMsg.chunk.thought
-            if (enableLog) {
-              logger.log(`[IFlowACP] [Reasoning] ${assistantMsg.chunk.thought.substring(0, 50)}...`)
+            // Reasoning content in stream
+            const chunk: StreamChunk = {
+              id: chatId, object: 'chat.completion.chunk', created, model: request.model,
+              choices: [{ index: 0, delta: { reasoning_content: assistantMsg.chunk.thought }, finish_reason: null }]
             }
+            res.write(`data: ${JSON.stringify(chunk)}\n\n`)
           } else if (assistantMsg.chunk?.text) {
-            // This is regular content
-            delta.content = assistantMsg.chunk.text
-            if (enableLog) {
-              logger.log(`[IFlowACP] [Content] ${assistantMsg.chunk.text.substring(0, 50)}...`)
+            const text = assistantMsg.chunk.text
+            contentBuffer += text
+            
+            // Text Parsing Engine for tools
+            if (!isExtractingTool) {
+              const startIdx = contentBuffer.indexOf('<<USA_TOOL>>')
+              if (startIdx !== -1) {
+                // Found start of tool call - flush EVERYTHING before the tag
+                const normalText = contentBuffer.substring(0, startIdx)
+                if (normalText) {
+                  const chunk: StreamChunk = {
+                    id: chatId, object: 'chat.completion.chunk', created, model: request.model,
+                    choices: [{ index: 0, delta: { content: normalText }, finish_reason: null }]
+                  }
+                  res.write(`data: ${JSON.stringify(chunk)}\n\n`)
+                }
+                
+                isExtractingTool = true
+                // Start filling toolString with the rest of the buffer after the tag
+                toolString = contentBuffer.substring(startIdx + 12)
+                contentBuffer = ''
+              } else {
+                // We haven't seen the full tag yet, but we might have a partial one at the end
+                // Find potential start of tag '<'
+                const lastLt = contentBuffer.lastIndexOf('<')
+                
+                if (lastLt === -1) {
+                  // No tag start suspected, flush everything
+                  const chunk: StreamChunk = {
+                    id: chatId, object: 'chat.completion.chunk', created, model: request.model,
+                    choices: [{ index: 0, delta: { content: contentBuffer }, finish_reason: null }]
+                  }
+                  res.write(`data: ${JSON.stringify(chunk)}\n\n`)
+                  contentBuffer = ''
+                } else if (contentBuffer.length - lastLt > 12) {
+                  // Buffer has something starting with '<' but it's longer than the actual tag length 
+                  // and didn't match '<<USA_TOOL>>' (checked above), so it's probably just normal text
+                  const chunk: StreamChunk = {
+                    id: chatId, object: 'chat.completion.chunk', created, model: request.model,
+                    choices: [{ index: 0, delta: { content: contentBuffer }, finish_reason: null }]
+                  }
+                  res.write(`data: ${JSON.stringify(chunk)}\n\n`)
+                  contentBuffer = ''
+                } else {
+                  // Suspect a tag might be starting at the end - flush everything BEFORE the '<'
+                  const flushText = contentBuffer.substring(0, lastLt)
+                  if (flushText) {
+                    const chunk: StreamChunk = {
+                      id: chatId, object: 'chat.completion.chunk', created, model: request.model,
+                      choices: [{ index: 0, delta: { content: flushText }, finish_reason: null }]
+                    }
+                    res.write(`data: ${JSON.stringify(chunk)}\n\n`)
+                  }
+                  contentBuffer = contentBuffer.substring(lastLt)
+                }
+              }
+            } else {
+              // We ARE extracting a tool call
+              toolString += text
+              contentBuffer = '' // Clear it just in case
+            }
+
+            // Check if tool call has finished
+            if (isExtractingTool && toolString.includes('<</USA_TOOL>>')) {
+              const toolContent = (toolString.split('<</USA_TOOL>>')[0] || '').trim()
+              fileLog(`[TOOL PARSED] Payload: ${toolContent}`)
+              if (enableLog) logger.log(`[IFlowACP] Extracted Tool JSON: ${toolContent}`)
+              
+              // Parse JSON and emit tool_calls to OpenCode and FORCE CLOSE stream
+              try {
+                const toolJson = JSON.parse(toolContent)
+                
+                // --- Robust Tool Name Mapping ---
+                // GLM-5 might hallucinate internal or generic tool names. Map them to OpenCode's required names.
+                let mappedName = toolJson.name
+                if (['run_shell_command', 'execute_command', 'run_command', 'shell'].includes(mappedName)) {
+                  mappedName = 'bash'
+                } else if (['read_text_file', 'read_file', 'cat'].includes(mappedName)) {
+                  mappedName = 'read'
+                } else if (['write_to_file', 'write_file', 'save_file'].includes(mappedName)) {
+                  mappedName = 'write'
+                } else if (['edit_file', 'replace_in_file', 'modify_file'].includes(mappedName)) {
+                  mappedName = 'edit'
+                } else if (['search_web', 'fetch_url', 'curl'].includes(mappedName)) {
+                  mappedName = 'webfetch'
+                }
+                
+                // If it's bash, it needs 'description' field too! If missing, hallucinate one
+                if (mappedName === 'bash' && (!toolJson.arguments || !toolJson.arguments.description)) {
+                  toolJson.arguments = toolJson.arguments || {}
+                  toolJson.arguments.description = "Auto-generated bash description"
+                }
+
+                const openAIToolCall = {
+                  index: 0,
+                  id: `call_${randomUUID()}`,
+                  type: 'function' as const,
+                  function: {
+                    name: mappedName,
+                    arguments: JSON.stringify(toolJson.arguments || {})
+                  }
+                }
+                
+                const chunk: StreamChunk = {
+                  id: chatId, object: 'chat.completion.chunk', created, model: request.model,
+                  choices: [{ index: 0, delta: { tool_calls: [openAIToolCall] }, finish_reason: 'tool_calls' }]
+                }
+                res.write(`data: ${JSON.stringify(chunk)}\n\n`)
+                res.write('data: [DONE]\n\n')
+                res.end()
+                fileLog(`[TOOL EXECUTED] Mapped ${toolJson.name} -> ${mappedName}. Sent tool_calls delta to OpenCode and forcefully closed stream.`)
+                return // We forcefully exit the stream block
+              } catch (e) {
+                fileLog(`[TOOL ERROR] Failed to parse JSON: ${toolContent}`)
+              }
             }
           }
           break
 
         case MessageType.TOOL_CALL:
-          // Reenviar tool_calls a OpenCode — ahora glm-5 usa los nombres de tools de OpenCode
-          // gracias al append_system_prompt inyectado en la sesión
-          const toolMsg = message as any
+          const toolCallMsg = message as any
+          fileLog(`[NATIVE TOOL CALL] Intercepted: ${JSON.stringify(toolCallMsg)}`)
           
-          if (toolMsg.status === ToolCallStatus.PENDING ||
-              toolMsg.status === ToolCallStatus.IN_PROGRESS) {
-            // Nueva tool call iniciando
-            const openAIToolCall = convertToolCallToOpenAI(toolMsg)
-            delta.tool_calls = [openAIToolCall]
-            currentToolCall = toolMsg
+          // We want to catch the tool call as early as possible (status: pending)
+          // to prevent internal execution and forward to OpenCode.
+          if (toolCallMsg.toolName) {
+            const toolName = toolCallMsg.toolName
+            const args = toolCallMsg.args || {}
             
-            if (enableLog) {
-              logger.log(`[IFlowACP] [Tool Call] name=${toolMsg.toolName || toolMsg.label} status=${toolMsg.status}`)
+            // Map tool names to OpenCode equivalents
+            let mappedName = toolName
+            if (['run_shell_command', 'execute_command', 'run_command', 'shell', 'terminal', 'bash_execute'].includes(mappedName)) {
+              mappedName = 'bash'
+            } else if (['read_text_file', 'read_file', 'cat', 'getFile'].includes(mappedName)) {
+              mappedName = 'read'
+            } else if (['write_to_file', 'write_file', 'save_file', 'createFile'].includes(mappedName)) {
+              mappedName = 'write'
+            } else if (['edit_file', 'replace_in_file', 'modify_file', 'patch_file'].includes(mappedName)) {
+              mappedName = 'edit'
             }
-          } else if (toolMsg.status === ToolCallStatus.COMPLETED ||
-                     toolMsg.status === ToolCallStatus.FAILED) {
-            if (enableLog) {
-              logger.log(`[IFlowACP] [Tool Result] name=${toolMsg.toolName} output=${toolMsg.output?.substring(0, 100) || ''}`)
+            
+            const openAIToolCall = {
+              index: 0,
+              id: `call_${randomUUID()}`,
+              type: 'function' as const,
+              function: {
+                name: mappedName,
+                arguments: JSON.stringify(args)
+              }
             }
+            
+            const chunk: StreamChunk = {
+              id: chatId, object: 'chat.completion.chunk', created, model: request.model,
+              choices: [{ index: 0, delta: { tool_calls: [openAIToolCall] }, finish_reason: 'tool_calls' }]
+            }
+            res.write(`data: ${JSON.stringify(chunk)}\n\n`)
+            res.write('data: [DONE]\n\n')
+            res.end()
+            fileLog(`[TOOL INTERCEPTED] Forwarded ${toolName} -> ${mappedName} to OpenCode. Ending stream.`)
+            return // Stop processing current iFlow stream
           }
           break
 
         case MessageType.TASK_FINISH:
-          // Task is complete
+          // If we reach natural finish without tools
           const finishMsg = message as any
-          
           const finishChunk: StreamChunk = {
-            id: chatId,
-            object: 'chat.completion.chunk',
-            created,
-            model: request.model,
-            choices: [{
-              index: 0,
-              delta: {},
-              finish_reason: finishMsg.stopReason === 'max_tokens' ? 'length' : 'stop'
-            }]
+            id: chatId, object: 'chat.completion.chunk', created, model: request.model,
+            choices: [{ index: 0, delta: {}, finish_reason: finishMsg.stopReason === 'max_tokens' ? 'length' : 'stop' }]
           }
-          
           res.write(`data: ${JSON.stringify(finishChunk)}\n\n`)
           res.write('data: [DONE]\n\n')
           res.end()
-          
-          if (enableLog) {
-            logger.log(`[IFlowACP] [Finish] reason=${finishMsg.stopReason}`)
-          }
+          fileLog(`[STREAM END] Natural finish: ${finishMsg.stopReason}`)
           return
 
         case MessageType.ERROR:
           const errorMsg = message as any
-          logger.log(`[IFlowACP] [Error] ${errorMsg.message}`)
+          fileLog(`[ERROR] ACP Message Error: ${errorMsg.message}`)
           break
-
-        case MessageType.PLAN:
-          const planMsg = message as any
-          if (planMsg.entries && planMsg.entries.length > 0) {
-            const planText = planMsg.entries.map((e: any) => 
-              `- [${e.priority}] ${e.content} (${e.status})`
-            ).join('\n')
-            delta.reasoning_content = `Plan:\n${planText}`
-          }
-          break
-
+          
         case MessageType.ASK_USER_QUESTIONS:
           const askMsg = message as any
           if (askMsg.questions && askMsg.questions.length > 0) {
             const answers: Record<string, string> = {}
             for (const q of askMsg.questions) {
-              if (q.options && q.options.length > 0) {
-                answers[q.header] = q.options[0].label
-              }
+              if (q.options && q.options.length > 0) answers[q.header] = q.options[0].label
             }
-            await client.respondToAskUserQuestions(answers)
-            if (enableLog) {
-              logger.log(`[IFlowACP] [Auto-answered questions] ${JSON.stringify(answers)}`)
-            }
+            client.respondToAskUserQuestions(answers).catch(() => {})
           }
           continue
 
         case MessageType.EXIT_PLAN_MODE:
-          await client.respondToExitPlanMode(true)
-          if (enableLog) {
-            logger.log(`[IFlowACP] [Auto-approved plan]`)
-          }
+          client.respondToExitPlanMode(true).catch(() => {})
           continue
 
         case MessageType.PERMISSION_REQUEST:
           const permMsg = message as any
+          fileLog(`[PERMISSION REQUEST] ${JSON.stringify(permMsg)}`)
+          
+          // DO NOT auto-approve tool execution permissions. 
+          // We want to intercept the TOOL_CALL and let OpenCode handle it.
+          // If we approve here, iFlow's CLI might execute it before we catch the TOOL_CALL text/event.
           if (permMsg.options && permMsg.options.length > 0) {
-            await client.respondToToolConfirmation(permMsg.requestId, permMsg.options[0].optionId)
-            if (enableLog) {
-              logger.log(`[IFlowACP] [Auto-approved permission] requestId=${permMsg.requestId}`)
+            // Only auto-approve if NOT a tool execution. 
+            // Most permission requests in iFlow CLI are for tools.
+            const isToolPermission = true // Assume tool related in this context
+            
+            if (isToolPermission) {
+              fileLog(`[PERMISSION DENIED] Blocked internal tool execution to delegate to OpenCode.`)
+              // We don't respond, or we respond with a denial if possible.
+              // For now, doing nothing might be safer or we can find the "deny" optionId.
+              const denyOption = permMsg.options.find((o: any) => o.type === 'deny' || o.label?.toLowerCase().includes('deny'))
+              if (denyOption) {
+                client.respondToToolConfirmation(permMsg.requestId, denyOption.optionId).catch(() => {})
+              }
+            } else {
+              client.respondToToolConfirmation(permMsg.requestId, permMsg.options[0].optionId).catch(() => {})
             }
           }
           continue
       }
-
-      // Only emit if delta has content
-      if (delta.content || delta.reasoning_content || delta.tool_calls) {
-        const chunk: StreamChunk = {
-          id: chatId,
-          object: 'chat.completion.chunk',
-          created,
-          model: request.model,
-          choices: [{
-            index: 0,
-            delta,
-            finish_reason: null
-          }]
-        }
-
-        res.write(`data: ${JSON.stringify(chunk)}\n\n`)
-      }
     }
 
   } catch (error: any) {
-    logger.log('[IFlowACP] Error:', error.message)
-    
+    fileLog(`[EXCEPTION] Proxy Error: ${error.message}`)
     const errorChunk: StreamChunk = {
-      id: chatId,
-      object: 'chat.completion.chunk',
-      created,
-      model: request.model,
-      choices: [{
-        index: 0,
-        delta: { content: `Error: ${error.message}` },
-        finish_reason: 'stop'
-      }]
+      id: chatId, object: 'chat.completion.chunk', created, model: request.model,
+      choices: [{ index: 0, delta: { content: `Error: ${error.message}` }, finish_reason: 'stop' }]
     }
-    
     res.write(`data: ${JSON.stringify(errorChunk)}\n\n`)
     res.write('data: [DONE]\n\n')
     res.end()
   }
 }
 
-/**
- * Cleanup ACP clients on process exit
- */
 export async function cleanupACPClients(): Promise<void> {
-  for (const [model, entry] of acpClients) {
-    try {
-      await entry.client.disconnect()
-      log(`Disconnected ACP client for model: ${model}`)
-    } catch (err) {
-      log(`Error disconnecting ACP client for ${model}:`, err)
-    }
+  for (const [model, client] of acpClients) {
+    try { await client.disconnect() } catch (err) {}
   }
   acpClients.clear()
 }
 
-// Register cleanup on process exit
 process.on('SIGINT', cleanupACPClients)
 process.on('SIGTERM', cleanupACPClients)
-
-
-
