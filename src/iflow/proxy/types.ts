@@ -44,6 +44,7 @@ export interface StreamChunk {
       role?: string
       content?: string
       reasoning_content?: string
+      thought?: string
       tool_calls?: Array<{
         index: number
         id?: string

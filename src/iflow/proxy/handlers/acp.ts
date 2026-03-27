@@ -31,9 +31,11 @@ const IFLOW_INTERNAL_TOOLS = [
   'read_multiple_files',
   'write_to_file',
   'list_directory',
+  'list_directory_with_sizes',
   'directory_tree',
   'execute_command',
   'run_command',
+  'run_shell_command',
   'todo_write',
   'todo_read',
   'create_directory',
@@ -49,6 +51,117 @@ const IFLOW_INTERNAL_TOOLS = [
   'sed',
   'grep'
 ]
+
+function normalizeToolCall(name: string, args: any): { name: string; args: any } {
+  const originalName = name
+  const originalArgs = JSON.stringify(args)
+  
+  let mappedName = name
+  let mappedArgs = { ...args }
+
+  // 1. Tool Redirection
+  if (['run_shell_command', 'execute_command', 'run_command', 'shell', 'terminal', 'bash_execute'].includes(mappedName)) {
+    mappedName = 'bash'
+  } else if (['read_text_file', 'read_file', 'cat', 'getFile'].includes(mappedName)) {
+    mappedName = 'read'
+  } else if (['write_to_file', 'write_file', 'save_file', 'createFile'].includes(mappedName)) {
+    mappedName = 'write'
+  } else if (['edit_file', 'replace_in_file', 'modify_file', 'patch_file'].includes(mappedName)) {
+    mappedName = 'edit'
+  } else if (['search_web', 'fetch_url', 'curl'].includes(mappedName)) {
+    mappedName = 'webfetch'
+  } else if (mappedName === 'list_directory_with_sizes' || mappedName === 'list_directory' || mappedName === 'ls' || mappedName === 'list_dir') {
+    mappedName = 'bash'
+    mappedArgs = {
+      command: `ls -lh ${args?.filePath || args?.path || args?.directory || '.'}`,
+      description: `Listing directory: ${args?.filePath || args?.path || args?.directory || '.'}`,
+      run_in_background: false
+    }
+    fileLog(`[TOOL NORMALIZATION] Redirected ${originalName} -> bash (ls)`)
+    return { name: mappedName, args: mappedArgs }
+  }
+
+  if (mappedName !== originalName) {
+    fileLog(`[TOOL NORMALIZATION] Mapped tool name: ${originalName} -> ${mappedName}`)
+  }
+
+  // 2. Argument Normalization (Rename hallucinations)
+  
+  // Bash/Task fixes
+  if (mappedName === 'bash' || mappedName === 'task' || mappedName === 'task_create' || mappedName === 'explore-agent') {
+    if (mappedName === 'bash' && !mappedArgs.command && mappedArgs.script) {
+      mappedArgs.command = mappedArgs.script
+      fileLog(`[TOOL NORMALIZATION] Fixed bash argument: script -> command`)
+    }
+    if (mappedArgs.run_in_background === undefined) {
+      mappedArgs.run_in_background = false
+      fileLog(`[TOOL NORMALIZATION] Injected missing required parameter: run_in_background=false into ${mappedName}`)
+    }
+    if (mappedArgs.load_skills === undefined) {
+      mappedArgs.load_skills = []
+      fileLog(`[TOOL NORMALIZATION] Injected missing required parameter: load_skills=[] into ${mappedName}`)
+    }
+    if (!mappedArgs.description) {
+      mappedArgs.description = `Executing: ${mappedName}`
+      fileLog(`[TOOL NORMALIZATION] Injected missing parameter: description into ${mappedName}`)
+    }
+  }
+  
+  // Read fixes (OpenCode expects filePath)
+  if (mappedName === 'read') {
+    // If we have NO filePath but we have some other path-like variable, move it
+    if (!mappedArgs.filePath) {
+      const pathValue = mappedArgs.path || mappedArgs.absolute_path || mappedArgs.file || mappedArgs.filename || mappedArgs.uri
+      if (pathValue) {
+        mappedArgs.filePath = pathValue
+        fileLog(`[TOOL NORMALIZATION] Aggressive read mapping: detected path-like argument and assigned to filePath`)
+      }
+    }
+  }
+  
+  // Write/Edit fixes
+  if (mappedName === 'write' || mappedName === 'edit') {
+    if (!mappedArgs.filePath) {
+      const pathValue = mappedArgs.path || mappedArgs.target_file || mappedArgs.file || mappedArgs.filename
+      if (pathValue) {
+        mappedArgs.filePath = pathValue
+        fileLog(`[TOOL NORMALIZATION] Aggressive ${mappedName} mapping: assigned filePath`)
+      }
+    }
+  }
+
+  // 3. Strict Cleaning (OpenCode tools can be strict about extra keys)
+  let cleanedArgs: any = {}
+  
+  if (mappedName === 'read') {
+    cleanedArgs.filePath = mappedArgs.filePath || mappedArgs.path || ''
+  } else if (mappedName === 'write') {
+    cleanedArgs.filePath = mappedArgs.filePath || mappedArgs.path || ''
+    cleanedArgs.content = mappedArgs.content || mappedArgs.text || ''
+  } else if (mappedName === 'edit') {
+    cleanedArgs.filePath = mappedArgs.filePath || mappedArgs.path || ''
+    cleanedArgs.text = mappedArgs.text || ''
+    cleanedArgs.explanation = mappedArgs.explanation || ''
+  } else if (mappedName === 'bash') {
+    cleanedArgs.command = mappedArgs.command || ''
+    cleanedArgs.description = mappedArgs.description || 'Executing command'
+    cleanedArgs.run_in_background = !!mappedArgs.run_in_background
+  } else if (mappedName === 'task' || mappedName === 'task_create') {
+    cleanedArgs.description = mappedArgs.description || ''
+    cleanedArgs.run_in_background = !!mappedArgs.run_in_background
+    cleanedArgs.load_skills = Array.isArray(mappedArgs.load_skills) ? mappedArgs.load_skills : []
+  } else {
+    // For unknown tools, just use what we have
+    cleanedArgs = mappedArgs
+  }
+
+  const finalArgs = JSON.stringify(cleanedArgs)
+  if (originalArgs !== finalArgs) {
+    fileLog(`[TOOL NORMALIZATION] Arguments corrected: BEFORE=${originalArgs} AFTER=${finalArgs}`)
+  }
+
+  return { name: mappedName, args: cleanedArgs }
+}
 
 // Store active ACP clients by model
 const acpClients = new Map<string, IFlowClient>()
@@ -180,10 +293,11 @@ export async function handleACPStreamRequest(
         case MessageType.ASSISTANT:
           const assistantMsg = message as any
           if (assistantMsg.chunk?.thought) {
-            // Reasoning content in stream
+            // Reasoning content in stream - Send BOTH reasoning_content (OpenAI standard) and thought (Antigravity standard)
+            // Also include role: assistant in the first chunk if needed
             const chunk: StreamChunk = {
               id: chatId, object: 'chat.completion.chunk', created, model: request.model,
-              choices: [{ index: 0, delta: { reasoning_content: assistantMsg.chunk.thought }, finish_reason: null }]
+              choices: [{ index: 0, delta: { role: 'assistant', reasoning_content: assistantMsg.chunk.thought, thought: assistantMsg.chunk.thought } as any, finish_reason: null }]
             }
             res.write(`data: ${JSON.stringify(chunk)}\n\n`)
           } else if (assistantMsg.chunk?.text) {
@@ -258,46 +372,26 @@ export async function handleACPStreamRequest(
               // Parse JSON and emit tool_calls to OpenCode and FORCE CLOSE stream
               try {
                 const toolJson = JSON.parse(toolContent)
+                const normalized = normalizeToolCall(toolJson.name, toolJson.arguments || {})
                 
-                // --- Robust Tool Name Mapping ---
-                // GLM-5 might hallucinate internal or generic tool names. Map them to OpenCode's required names.
-                let mappedName = toolJson.name
-                if (['run_shell_command', 'execute_command', 'run_command', 'shell'].includes(mappedName)) {
-                  mappedName = 'bash'
-                } else if (['read_text_file', 'read_file', 'cat'].includes(mappedName)) {
-                  mappedName = 'read'
-                } else if (['write_to_file', 'write_file', 'save_file'].includes(mappedName)) {
-                  mappedName = 'write'
-                } else if (['edit_file', 'replace_in_file', 'modify_file'].includes(mappedName)) {
-                  mappedName = 'edit'
-                } else if (['search_web', 'fetch_url', 'curl'].includes(mappedName)) {
-                  mappedName = 'webfetch'
-                }
-                
-                // If it's bash, it needs 'description' field too! If missing, hallucinate one
-                if (mappedName === 'bash' && (!toolJson.arguments || !toolJson.arguments.description)) {
-                  toolJson.arguments = toolJson.arguments || {}
-                  toolJson.arguments.description = "Auto-generated bash description"
-                }
-
                 const openAIToolCall = {
                   index: 0,
                   id: `call_${randomUUID()}`,
                   type: 'function' as const,
                   function: {
-                    name: mappedName,
-                    arguments: JSON.stringify(toolJson.arguments || {})
+                    name: normalized.name,
+                    arguments: JSON.stringify(normalized.args)
                   }
                 }
                 
                 const chunk: StreamChunk = {
                   id: chatId, object: 'chat.completion.chunk', created, model: request.model,
-                  choices: [{ index: 0, delta: { tool_calls: [openAIToolCall] }, finish_reason: 'tool_calls' }]
+                  choices: [{ index: 0, delta: { role: 'assistant', tool_calls: [openAIToolCall] } as any, finish_reason: 'tool_calls' }]
                 }
                 res.write(`data: ${JSON.stringify(chunk)}\n\n`)
                 res.write('data: [DONE]\n\n')
                 res.end()
-                fileLog(`[TOOL EXECUTED] Mapped ${toolJson.name} -> ${mappedName}. Sent tool_calls delta to OpenCode and forcefully closed stream.`)
+                fileLog(`[TOOL EXECUTED] Mapped ${toolJson.name} -> ${normalized.name}. Sent tool_calls delta to OpenCode and forcefully closed stream.`)
                 return // We forcefully exit the stream block
               } catch (e) {
                 fileLog(`[TOOL ERROR] Failed to parse JSON: ${toolContent}`)
@@ -313,39 +407,26 @@ export async function handleACPStreamRequest(
           // We want to catch the tool call as early as possible (status: pending)
           // to prevent internal execution and forward to OpenCode.
           if (toolCallMsg.toolName) {
-            const toolName = toolCallMsg.toolName
-            const args = toolCallMsg.args || {}
-            
-            // Map tool names to OpenCode equivalents
-            let mappedName = toolName
-            if (['run_shell_command', 'execute_command', 'run_command', 'shell', 'terminal', 'bash_execute'].includes(mappedName)) {
-              mappedName = 'bash'
-            } else if (['read_text_file', 'read_file', 'cat', 'getFile'].includes(mappedName)) {
-              mappedName = 'read'
-            } else if (['write_to_file', 'write_file', 'save_file', 'createFile'].includes(mappedName)) {
-              mappedName = 'write'
-            } else if (['edit_file', 'replace_in_file', 'modify_file', 'patch_file'].includes(mappedName)) {
-              mappedName = 'edit'
-            }
+            const normalized = normalizeToolCall(toolCallMsg.toolName, toolCallMsg.args || {})
             
             const openAIToolCall = {
               index: 0,
               id: `call_${randomUUID()}`,
               type: 'function' as const,
               function: {
-                name: mappedName,
-                arguments: JSON.stringify(args)
+                name: normalized.name,
+                arguments: JSON.stringify(normalized.args)
               }
             }
             
             const chunk: StreamChunk = {
               id: chatId, object: 'chat.completion.chunk', created, model: request.model,
-              choices: [{ index: 0, delta: { tool_calls: [openAIToolCall] }, finish_reason: 'tool_calls' }]
+              choices: [{ index: 0, delta: { role: 'assistant', tool_calls: [openAIToolCall] } as any, finish_reason: 'tool_calls' }]
             }
             res.write(`data: ${JSON.stringify(chunk)}\n\n`)
             res.write('data: [DONE]\n\n')
             res.end()
-            fileLog(`[TOOL INTERCEPTED] Forwarded ${toolName} -> ${mappedName} to OpenCode. Ending stream.`)
+            fileLog(`[TOOL INTERCEPTED] Forwarded ${toolCallMsg.toolName} -> ${normalized.name} to OpenCode. Arguments: ${JSON.stringify(normalized.args)}. Ending stream.`)
             return // Stop processing current iFlow stream
           }
           break
