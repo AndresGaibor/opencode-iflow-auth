@@ -1,8 +1,6 @@
 import { IFlowCLIProxy } from './dist/iflow/proxy.js';
 
 const proxy = new IFlowCLIProxy();
-proxy.start().then(() => {
-  console.log('Proxy started at:', proxy.getBaseUrl());
-});
+proxy.start();
 
 setInterval(() => {}, 1000);

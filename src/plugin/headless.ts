@@ -16,13 +16,9 @@ export function isHeadlessEnvironment(): boolean {
 export async function promptOAuthCallback(): Promise<string> {
   const rl = createInterface({ input, output })
   try {
-    console.log('\n' + '='.repeat(60))
-    console.log('Headless environment detected!')
-    console.log('Please complete authentication in your local browser.')
-    console.log('After authorization, paste the callback URL or authorization code.')
-    console.log('='.repeat(60) + '\n')
-    
-    const answer = await rl.question('Paste callback URL or authorization code: ')
+    const answer = await rl.question(
+      'Headless environment detected. Completa la autenticación en tu navegador y pega aquí la callback URL o el authorization code: ',
+    )
     return answer.trim()
   } finally {
     rl.close()
@@ -32,11 +28,6 @@ export async function promptOAuthCallback(): Promise<string> {
 export async function promptWaitForOAuth(): Promise<void> {
   const rl = createInterface({ input, output })
   try {
-    console.log('\n' + '='.repeat(60))
-    console.log('OAuth server is running. Waiting for callback...')
-    console.log('Open the URL above in your browser to complete authentication.')
-    console.log('='.repeat(60) + '\n')
-    
     await rl.question('Press Enter after completing authentication in browser...')
   } finally {
     rl.close()

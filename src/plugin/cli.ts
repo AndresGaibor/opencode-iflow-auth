@@ -22,15 +22,10 @@ export interface ExistingAccountInfo {
 export async function promptLoginMode(existingAccounts: ExistingAccountInfo[]): Promise<LoginMode> {
   const rl = createInterface({ input, output })
   try {
-    console.log(`\n${existingAccounts.length} account(s) saved:`)
-    for (const acc of existingAccounts) {
-      const label = acc.email || `Account ${acc.index + 1}`
-      console.log(`  ${acc.index + 1}. ${label}`)
-    }
-    console.log('')
-
     while (true) {
-      const answer = await rl.question('(a)dd new account(s) or (f)resh start? [a/f]: ')
+      const answer = await rl.question(
+        `${existingAccounts.length} cuenta(s) guardada(s). ¿(a)ñadir nuevas cuentas o empezar de (f)resco? [a/f]: `,
+      )
       const normalized = answer.trim().toLowerCase()
 
       if (normalized === 'a' || normalized === 'add') {
@@ -40,7 +35,6 @@ export async function promptLoginMode(existingAccounts: ExistingAccountInfo[]): 
         return 'fresh'
       }
 
-      console.log("Please enter 'a' to add accounts or 'f' to start fresh.")
     }
   } finally {
     rl.close()
@@ -62,8 +56,6 @@ export async function promptAuthMethod(): Promise<AuthMethod> {
       if (normalized === 'a' || normalized === 'apikey' || normalized === 'api') {
         return 'apikey'
       }
-
-      console.log("Please enter 'o' for OAuth or 'a' for API Key.")
     }
   } finally {
     rl.close()

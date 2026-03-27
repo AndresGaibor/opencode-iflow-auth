@@ -241,14 +241,13 @@ export function getIDCAuthHtml(
       try {
         const response = await fetch(statusUrl);
         const data = await response.json();
-        
+
         if (data.status === 'success') {
           window.location.href = '/success';
         } else if (data.status === 'failed' || data.status === 'timeout') {
           window.location.href = '/error?message=' + encodeURIComponent(data.message || 'Authentication failed');
         }
-      } catch (error) {
-        console.error('Status check failed:', error);
+      } catch {
       }
     }
 
@@ -394,8 +393,7 @@ export function getSuccessHtml(): string {
         clearInterval(interval);
         try {
           window.close();
-        } catch (e) {
-          console.log('Couluto-close window');
+        } catch {
         }
       }
     }, 1000);
@@ -571,8 +569,7 @@ export function getErrorHtml(message: string): string {
         clearInterval(interval);
         try {
           window.close();
-        } catch (e) {
-          console.log('Could not auto-close window');
+        } catch {
         }
       }
     }, 1000);
