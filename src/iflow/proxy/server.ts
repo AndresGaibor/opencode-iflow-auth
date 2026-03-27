@@ -173,21 +173,7 @@ export class IFlowCLIProxy {
   }
 
   private async handleCLIStreamRequest(request: ChatCompletionRequest, res: ServerResponse): Promise<void> {
-    // Si el request tiene tools, usar la API directa de iflow (OpenAI-compatible)
-    // ACP inyecta las tools internas de iflow, impidiendo que glm-5 vea las tools de OpenCode.
-    // La API directa pasa tools/messages completos al modelo → glm-5 genera tool_calls correctas.
-    if (request.tools && request.tools.length > 0) {
-      const authStr = '' // La API key se extrae en handleChatCompletions, la pasamos vacía
-      // Necesitamos el apiKey — lo guardamos temporalmente en el request
-      const apiKey = (request as any)._apiKey || ''
-      if (enableLog) {
-        logger.log(`[IFlowProxy] [CLI+Tools] Routing to direct API (tools present: ${request.tools.length})`)
-      }
-      await handleDirectAPIRequest(request, res, true, apiKey, this.enableLog)
-      return
-    }
-
-    // Use ACP protocol for non-tool streaming (reasoning, text generation)
+    // Use ACP protocol for tool calls support
     if (USE_ACP_PROTOCOL) {
       try {
         await handleACPStreamRequest(request, res, this.enableLog)
