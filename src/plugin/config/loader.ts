@@ -131,6 +131,11 @@ function applyEnvOverrides(config: IFlowConfig): IFlowConfig {
     enable_log_api_request: parseBooleanEnv(
       env.IFLOW_ENABLE_LOG_API_REQUEST,
       config.enable_log_api_request
+    ),
+
+    strict_opencode_tools: parseBooleanEnv(
+      env.IFLOW_STRICT_OPENCODE_TOOLS,
+      config.strict_opencode_tools
     )
   }
 }

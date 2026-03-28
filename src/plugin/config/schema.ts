@@ -14,7 +14,8 @@ export const IFlowConfigSchema = z.object({
   auth_server_port_range: z.number().min(1).max(100).default(10),
   max_request_iterations: z.number().min(10).max(1000).default(50),
   request_timeout_ms: z.number().min(60000).max(600000).default(300000),
-  enable_log_api_request: z.boolean().default(false)
+  enable_log_api_request: z.boolean().default(false),
+  strict_opencode_tools: z.boolean().default(true)
 })
 
 export type IFlowConfig = z.infer<typeof IFlowConfigSchema>
@@ -26,5 +27,6 @@ export const DEFAULT_CONFIG: IFlowConfig = {
   auth_server_port_range: 10,
   max_request_iterations: 50,
   request_timeout_ms: 300000,
-  enable_log_api_request: false
+  enable_log_api_request: false,
+  strict_opencode_tools: true
 }

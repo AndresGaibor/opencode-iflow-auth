@@ -8,12 +8,12 @@ import type { IFlowOAuthTokenResult } from '../iflow/oauth.js'
 import { exchangeOAuthCode } from '../iflow/oauth.js'
 import { isHeadlessEnvironment, promptOAuthCallback } from './headless.js'
 import {
-  buildSuccessHtml,
   buildErrorHtml,
   buildAuthFailedHtml,
   buildMissingParamHtml,
-  buildStateMismatchHtml
-} from './html.js'
+  buildStateMismatchHtml,
+} from './auth-error.js'
+import { buildSuccessHtml } from './auth-success.js'
 import { parseCallbackInput } from './callback-parser.js'
 import { OAUTH_SERVER_TIMEOUT_MS } from '../constants/limits.js'
 

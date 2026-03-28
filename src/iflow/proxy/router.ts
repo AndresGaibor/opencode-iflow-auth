@@ -8,6 +8,7 @@ import { handleDirectAPIRequest } from './handlers/api.js'
 import { handleACPStreamRequest } from './handlers/acp.js'
 import { callIFlowCLI, callIFlowCLIStream } from './handlers/cli.js'
 import { ServerResponse } from 'http'
+import { loadConfig } from '../../plugin/config/index.js'
 import type { ChatCompletionRequest } from './types.js'
 
 // Use ACP protocol (WebSocket) for CLI models - enables tool calls
@@ -96,10 +97,12 @@ async function handleCLIStreamRequest(
   res: ServerResponse,
   enableLog: boolean
 ): Promise<void> {
+  const config = loadConfig()
+  
   // Use ACP protocol for tool calls support
   if (USE_ACP_PROTOCOL) {
     try {
-      await handleACPStreamRequest(request, res, enableLog)
+      await handleACPStreamRequest(request, res, enableLog, config.strict_opencode_tools)
       return
     } catch (error: any) {
       console.error('ACP handler failed, falling back to stdin:', error.message)

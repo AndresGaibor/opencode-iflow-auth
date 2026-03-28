@@ -10,7 +10,6 @@
     "outDir": "dist",
     "declaration": true,
     "types": ["bun-types", "node"],
-    "allowImportingTsExtensions": true,
     "resolveJsonModule": true
   }
 }
