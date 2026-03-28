@@ -1,0 +1,29 @@
+[install]
+# Use exact versions when installing
+exact = true
+
+# Save dev dependencies separately
+save-dev = false
+
+[test]
+# Test configuration
+root = "./tests"
+coverage = true
+coverageReporter = ["text", "lcov"]
+
+# Include test files
+pattern = "**/*.test.ts"
+
+# Timeout for tests in seconds
+timeout = 30
+
+# Stop on first test failure
+failFast = false
+
+# Run tests in random order for better isolation detection
+randomize = true
+
+[compile]
+# Compile configuration for bun build
+minify = false
+sourceMaps = true

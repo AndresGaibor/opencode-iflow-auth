@@ -8,6 +8,9 @@
     "skipLibCheck": true,
     "noUncheckedIndexedAccess": true,
     "outDir": "dist",
-    "declaration": true
+    "declaration": true,
+    "types": ["bun-types", "node"],
+    "allowImportingTsExtensions": true,
+    "resolveJsonModule": true
   }
 }

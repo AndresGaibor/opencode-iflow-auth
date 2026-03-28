@@ -462,19 +462,134 @@ export function isACPDoneMessage(msg: any): boolean {
 }
 
 // ============================================================================
+// TOOL BLOCKING POLICY (Strict OpenCode Mode)
+// ============================================================================
+
+/**
+ * Tools that ALWAYS block in strict mode.
+ * These tools cause invisible work inside iFlow and break the "native OpenCode" illusion.
+ */
+const STRICT_MODE_BLOCKED_TOOLS = [
+  // Subagents - CRITICAL: causes invisible exploration inside iFlow
+  'task',
+  // No direct OpenCode equivalent - requires multiple 'read' calls
+  'read_multiple_files',
+  // Dangerous runtime execution
+  'python',
+  'sh',
+  // Too broad, not native OpenCode behavior
+  'computer_use',
+  // File ops without clear OpenCode equivalent
+  'create_directory',
+  'move_file',
+  'delete_file',
+  // Already in IFLOW_INTERNAL_TOOLS but also block at normalization level
+  'run_shell_command',
+  'execute_command',
+  'run_command',
+  'bash_execute',
+  'read_text_file',
+  'read_file',
+  'write_to_file',
+  'write_file',
+  'edit_file',
+  'replace_in_file',
+  'list_directory',
+  'list_directory_with_sizes',
+  'directory_tree',
+  'search_files',
+  'file_search',
+  'find_files',
+  'glob_search',
+  'cat',
+  'ls',
+  'shell',
+  'terminal',
+]
+
+/**
+ * Checks if a tool should be blocked based on policy.
+ * In strict mode, we block tools that would cause invisible work inside iFlow.
+ */
+export function shouldBlockTool(
+  toolName: string,
+  options?: { strictMode?: boolean }
+): { blocked: boolean; reason?: string } {
+  const strictMode = options?.strictMode !== false // Default to true
+  
+  if (!strictMode) {
+    return { blocked: false }
+  }
+  
+  const normalizedName = toolName.trim().toLowerCase()
+  
+  if (STRICT_MODE_BLOCKED_TOOLS.includes(normalizedName)) {
+    // Special handling for task - most critical
+    if (normalizedName === 'task') {
+      return { 
+        blocked: true, 
+        reason: 'task_blocked_in_strict_mode:subagents_cause_invisible_work' 
+      }
+    }
+    
+    // read_multiple_files - no direct equivalent
+    if (normalizedName === 'read_multiple_files') {
+      return { 
+        blocked: true, 
+        reason: 'read_multiple_files_blocked:no_direct_opencode_equivalent' 
+      }
+    }
+    
+    return { 
+      blocked: true, 
+      reason: `${normalizedName}_blocked_in_strict_mode` 
+    }
+  }
+  
+  return { blocked: false }
+}
+
+/**
+ * Gets the list of all blocked tools for documentation/debugging.
+ */
+export function getStrictModeBlockedTools(): string[] {
+  return [...STRICT_MODE_BLOCKED_TOOLS]
+}
+
+// ============================================================================
 // ACP MESSAGE PROCESSING
 // ============================================================================
 
 /**
  * Processes an ACP message and returns a structured result.
  * Priority: native tool call > fallback textual tool call > content > done
+ * 
+ * In strict mode, verifies tool blocking BEFORE normalizing.
  */
-export function processACPMessage(msg: any): ACPProcessingResult {
+export function processACPMessage(
+  msg: any, 
+  options?: { strictMode?: boolean }
+): ACPProcessingResult {
   if (!msg) return { type: 'noop' }
 
   // Priority 1: Native tool call from ACP
   const nativeToolCall = extractNativeACPToolCall(msg)
   if (nativeToolCall) {
+    // CHECK BLOCKING POLICY BEFORE NORMALIZING
+    const blockCheck = shouldBlockTool(nativeToolCall.name, { 
+      strictMode: options?.strictMode ?? true // Default to strict mode
+    })
+    
+    if (blockCheck.blocked) {
+      return {
+        type: 'tool_blocked',
+        originalName: nativeToolCall.name,
+        originalArgs: nativeToolCall.args,
+        reason: blockCheck.reason || 'blocked_by_policy',
+        reasoning: extractReasoning(msg),
+      }
+    }
+    
     return {
       type: 'tool_call',
       toolCall: normalizeToolCall(nativeToolCall.name, nativeToolCall.args),
@@ -487,6 +602,21 @@ export function processACPMessage(msg: any): ACPProcessingResult {
     // Priority 2: Fallback textual tool call
     const fallbackToolCall = extractToolCallFromText(text)
     if (fallbackToolCall) {
+      // CHECK BLOCKING POLICY BEFORE NORMALIZING
+      const blockCheck = shouldBlockTool(fallbackToolCall.name, { 
+        strictMode: options?.strictMode ?? true 
+      })
+      
+      if (blockCheck.blocked) {
+        return {
+          type: 'tool_blocked',
+          originalName: fallbackToolCall.name,
+          originalArgs: fallbackToolCall.args,
+          reason: blockCheck.reason || 'blocked_by_policy',
+          reasoning: extractReasoning(msg),
+        }
+      }
+      
       return {
         type: 'tool_call',
         toolCall: normalizeToolCall(fallbackToolCall.name, fallbackToolCall.args),

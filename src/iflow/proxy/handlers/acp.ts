@@ -27,7 +27,11 @@ import {
   buildToolContractMap,
   validateToolCallContract,
   generateTurnId,
+  logToolBlockCheck,
+  logToolBlocked,
+  logOpenCodeToolEmitted,
   type ToolContractMap,
+  type ToolCallSource,
 } from '../debug-logger.js'
 
 // Import OpenCode tools for hardcoded schemas
@@ -50,6 +54,8 @@ import {
   extractACPText,
   isACPDoneMessage,
   processACPMessage,
+  shouldBlockTool,
+  getStrictModeBlockedTools,
   SESSION_TTL_MS,
 } from './acp-utils.js'
 
@@ -70,6 +76,8 @@ export {
   extractACPText,
   isACPDoneMessage,
   processACPMessage,
+  shouldBlockTool,
+  getStrictModeBlockedTools,
   SESSION_TTL_MS,
 }
 
@@ -101,28 +109,41 @@ function cleanupExpiredSessions(): void {
 }
 
 // Tools internas de iflow que deben ser desactivadas para usar las de OpenCode
+// CRITICAL: This list must match the blocking policy in acp-utils.ts shouldBlockTool()
 const IFLOW_INTERNAL_TOOLS = [
+  // File operations - map to OpenCode tools
   'read_text_file',
+  'read_file',
   'read_multiple_files',
   'write_to_file',
+  'write_file',
   'list_directory',
   'list_directory_with_sizes',
   'directory_tree',
+  // Execution
   'execute_command',
   'run_command',
   'run_shell_command',
+  // File system operations
   'create_directory',
   'move_file',
   'delete_file',
+  // Search
   'search_files',
   'file_search',
+  // Dangerous - should always be blocked
   'computer_use',
   'bash',
   'sh',
   'python',
   'edit',
   'sed',
-  'grep'
+  'grep',
+  // CRITICAL: Subagents cause invisible work inside iFlow
+  'task',
+  // Task management - should map to OpenCode todowrite
+  'todo_write',
+  'todo_read',
 ]
 
 // ============================================================================
@@ -275,7 +296,7 @@ function emitToolCallChunk(
     sessionKey: string
     turnId: string
     originalToolCall?: { name: string; args: any }
-    source: 'native_acp' | 'textual_fallback' | 'unknown'
+    source: ToolCallSource
     contractMap?: ToolContractMap
   }
 ) {
@@ -509,9 +530,9 @@ export async function handleACPStreamRequest(
       const result = processACPMessage(message)
       
       // Determine source of tool call
-      let toolCallSource: 'native_acp' | 'textual_fallback' | 'unknown' = 'unknown'
+      let toolCallSource: ToolCallSource = 'unknown'
       if (result.type === 'tool_call') {
-        toolCallSource = extractNativeACPToolCall(message) ? 'native_acp' : 'textual_fallback'
+        toolCallSource = extractNativeACPToolCall(message) ? 'native_iflow' : 'fallback_text'
       }
       
       // Log processing result
@@ -544,6 +565,20 @@ export async function handleACPStreamRequest(
           state.emittedToolCall = true
           state.finished = true
           return // Stop processing - OpenCode will execute the tool
+
+        case 'tool_blocked':
+          // Tool was blocked by strict mode policy
+          logToolBlocked({
+            sessionKey,
+            turnId,
+            model,
+            toolNameOriginal: result.originalName,
+            argsOriginal: result.originalArgs || {},
+            reason: result.reason,
+          })
+          logProxy(`[TOOL BLOCKED] ${result.originalName} blocked: ${result.reason}`)
+          // Don't finish - let the model continue and try another approach
+          break
 
         case 'content':
           state.contentBuffer += result.content

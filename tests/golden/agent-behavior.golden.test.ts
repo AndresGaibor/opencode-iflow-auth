@@ -1,16 +1,20 @@
 /**
  * Golden tests for validating expected agent behavior sequences.
  * These tests compare actual tool sequences against expected patterns.
+ * 
+ * NOTE: These tests use OpenCode-native tool names (read, list, grep, edit)
+ * because iFlow internal tools (read_text_file, list_directory, etc.) are
+ * BLOCKED in strict mode.
  */
 
 import { describe, it, expect } from 'vitest'
 import { processACPMessage } from '../../src/iflow/proxy/handlers/acp-utils.js'
 
 // Import golden fixtures
-import repoReviewGolden from '../fixtures/opencode/repo-review.golden.json' assert { type: 'json' }
-import readmeGolden from '../fixtures/opencode/readme.golden.json' assert { type: 'json' }
-import grepSymbolGolden from '../fixtures/opencode/grep-symbol.golden.json' assert { type: 'json' }
-import editGolden from '../fixtures/opencode/edit.golden.json' assert { type: 'json' }
+import repoReviewGolden from '../fixtures/opencode/repo-review.golden.json' with { type: 'json' }
+import readmeGolden from '../fixtures/opencode/readme.golden.json' with { type: 'json' }
+import grepSymbolGolden from '../fixtures/opencode/grep-symbol.golden.json' with { type: 'json' }
+import editGolden from '../fixtures/opencode/edit.golden.json' with { type: 'json' }
 
 // Helper to simulate processing a sequence of ACP messages
 function processSequence(messages: any[]): { type: string; name?: string }[] {
@@ -21,6 +25,8 @@ function processSequence(messages: any[]): { type: string; name?: string }[] {
 
     if (result.type === 'tool_call') {
       results.push({ type: 'tool_call', name: result.toolCall!.name })
+    } else if (result.type === 'tool_blocked') {
+      results.push({ type: 'tool_blocked', name: result.originalName })
     } else if (result.type === 'content' && result.reasoning) {
       results.push({ type: 'reasoning' })
       if (result.content) {
@@ -69,12 +75,12 @@ describe('Golden: Repo Review', () => {
   it('should match expected sequence pattern', () => {
     const expected = repoReviewGolden.expectedSequence as { type: string; name?: string }[]
 
-    // Simulate a typical repo review flow with full sequence
+    // Simulate a typical repo review flow with OpenCode-native tools
     const messages = [
       { type: 'thinking', chunk: { thought: 'Exploring repo...' } },
-      { toolName: 'list_directory', args: { directory: '.' } },
+      { toolName: 'list', args: { path: '.' } },
       { type: 'thinking', chunk: { thought: 'Reading files...' } },
-      { toolName: 'read_text_file', args: { path: 'src/index.ts' } },
+      { toolName: 'read', args: { filePath: 'src/index.ts' } },
       { type: 'content', chunk: { text: 'Here is the repo structure...' } },
     ]
 
@@ -86,12 +92,13 @@ describe('Golden: Repo Review', () => {
   })
 
   it('should use list tool for directory exploration', () => {
-    const msg = { toolName: 'list_directory', args: { directory: '.' } }
+    // Using OpenCode-native 'list' tool
+    const msg = { toolName: 'list', args: { path: '.' } }
     const result = processACPMessage(msg)
     
     expect(result.type).toBe('tool_call')
     if (result.type === 'tool_call') {
-      expect(result.toolCall.name).toBe('list') // Not bash
+      expect(result.toolCall.name).toBe('list')
     }
   })
 
@@ -109,6 +116,14 @@ describe('Golden: Repo Review', () => {
     // This test documents expected behavior
     expect(repoReviewGolden.notes).toContain('Should explore before summarizing')
   })
+  
+  it('should BLOCK iFlow list_directory in strict mode', () => {
+    // iFlow's list_directory should be blocked, not passed through
+    const msg = { toolName: 'list_directory', args: { directory: '.' } }
+    const result = processACPMessage(msg)
+    
+    expect(result.type).toBe('tool_blocked')
+  })
 })
 
 // ============================================================================
@@ -119,8 +134,9 @@ describe('Golden: Read README', () => {
   it('should match expected sequence pattern', () => {
     const expected = readmeGolden.expectedSequence as { type: string; name?: string }[]
 
+    // Using OpenCode-native 'read' tool
     const messages = [
-      { toolName: 'read_text_file', args: { path: 'README.md' } },
+      { toolName: 'read', args: { filePath: 'README.md' } },
       { type: 'content', chunk: { text: 'Here is the README content...' } },
     ]
 
@@ -131,7 +147,8 @@ describe('Golden: Read README', () => {
   })
 
   it('should use read tool, not bash cat', () => {
-    const msg = { toolName: 'read_text_file', args: { path: 'README.md' } }
+    // Using OpenCode-native 'read' tool
+    const msg = { toolName: 'read', args: { filePath: 'README.md' } }
     const result = processACPMessage(msg)
     
     expect(result.type).toBe('tool_call')
@@ -143,6 +160,14 @@ describe('Golden: Read README', () => {
     // Check golden notes
     expect(readmeGolden.notes).toContain('Should use \'read\' tool')
   })
+  
+  it('should BLOCK iFlow read_text_file in strict mode', () => {
+    // iFlow's read_text_file should be blocked
+    const msg = { toolName: 'read_text_file', args: { path: 'README.md' } }
+    const result = processACPMessage(msg)
+    
+    expect(result.type).toBe('tool_blocked')
+  })
 })
 
 // ============================================================================
@@ -153,8 +178,9 @@ describe('Golden: Grep Symbol', () => {
   it('should match expected sequence pattern', () => {
     const expected = grepSymbolGolden.expectedSequence as { type: string; name?: string }[]
 
+    // Using OpenCode-native 'grep' tool
     const messages = [
-      { toolName: 'search_files', args: { pattern: 'IFlowClient' } },
+      { toolName: 'grep', args: { pattern: 'IFlowClient' } },
       { type: 'content', chunk: { text: 'Found IFlowClient in these files...' } },
     ]
 
@@ -165,13 +191,22 @@ describe('Golden: Grep Symbol', () => {
   })
 
   it('should use grep tool for code search', () => {
-    const msg = { toolName: 'search_files', args: { pattern: 'IFlowClient' } }
+    // Using OpenCode-native 'grep' tool
+    const msg = { toolName: 'grep', args: { pattern: 'IFlowClient' } }
     const result = processACPMessage(msg)
     
     expect(result.type).toBe('tool_call')
     if (result.type === 'tool_call') {
       expect(result.toolCall.name).toBe('grep')
     }
+  })
+  
+  it('should BLOCK iFlow search_files in strict mode', () => {
+    // iFlow's search_files should be blocked
+    const msg = { toolName: 'search_files', args: { pattern: 'IFlowClient' } }
+    const result = processACPMessage(msg)
+    
+    expect(result.type).toBe('tool_blocked')
   })
 })
 
@@ -183,9 +218,10 @@ describe('Golden: Edit File', () => {
   it('should match expected sequence pattern', () => {
     const expected = editGolden.expectedSequence as { type: string; name?: string }[]
 
+    // Using OpenCode-native 'edit' tool
     const messages = [
       { type: 'thinking', chunk: { thought: 'Preparing edit...' } },
-      { toolName: 'edit_file', args: {
+      { toolName: 'edit', args: {
         filePath: 'src/index.ts',
         oldString: 'foo',
         newString: 'bar'
@@ -200,8 +236,9 @@ describe('Golden: Edit File', () => {
   })
 
   it('should use edit tool with correct schema', () => {
+    // Using OpenCode-native 'edit' tool
     const msg = { 
-      toolName: 'edit_file', 
+      toolName: 'edit', 
       args: { 
         filePath: 'src/index.ts', 
         oldString: 'foo', 
@@ -222,6 +259,21 @@ describe('Golden: Edit File', () => {
     // Check golden notes
     expect(editGolden.notes).toContain('Should use \'edit\' tool with correct schema')
   })
+  
+  it('should BLOCK iFlow edit_file in strict mode', () => {
+    // iFlow's edit_file should be blocked
+    const msg = { 
+      toolName: 'edit_file', 
+      args: { 
+        filePath: 'src/index.ts', 
+        oldString: 'foo', 
+        newString: 'bar' 
+      }
+    }
+    const result = processACPMessage(msg)
+    
+    expect(result.type).toBe('tool_blocked')
+  })
 })
 
 // ============================================================================
@@ -241,7 +293,7 @@ describe('Pattern Validation', () => {
     
     const messages = [
       { chunk: { thought: 'Thinking...' } },
-      { toolName: 'list_directory', args: { directory: '.' } },
+      { toolName: 'list', args: { path: '.' } },
     ]
     
     const actual = processSequence(messages)

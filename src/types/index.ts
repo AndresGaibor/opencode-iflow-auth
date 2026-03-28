@@ -23,9 +23,12 @@ export type {
 // Model types
 export type {
   IFlowModelInfo,
-  ModelCache,
   MergedModelConfig
-} from '../iflow/models.js'
+} from '../iflow/models/types.js'
+
+export type {
+  ModelCache
+} from './cache.js'
 
 // Model config types
 export type {

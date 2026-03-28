@@ -1,6 +1,6 @@
 import type { Hooks, PluginInput } from "@opencode-ai/plugin"
 import { loadConfig } from "./plugin/config/index.js"
-import { AccountManager, generateAccountId } from "./plugin/accounts.js"
+import { AccountManager, generateAccountId } from "./plugin/accounts/index.js"
 import { startProxy, getProxyInstance } from "./iflow/proxy.js"
 import { promptApiKey, promptEmail } from "./plugin/cli.js"
 import { validateApiKey } from "./iflow/apikey.js"

@@ -2,16 +2,13 @@
  * Proxy server configuration constants
  */
 
-/** Default proxy server port */
-export const PROXY_PORT = 19998
+import { PROXY_PORT as PORT, PROXY_HOST as HOST } from './ports.js'
 
-/** Default proxy server host */
-export const PROXY_HOST = '127.0.0.1'
+/** Default proxy server port (re-exported for backward compatibility) */
+export const PROXY_PORT = PORT
 
-/** Proxy server base URL template */
-export function buildProxyUrl(port: number = PROXY_PORT, host: string = PROXY_HOST): string {
-  return `http://${host}:${port}/v1`
-}
+/** Default proxy server host (re-exported for backward compatibility) */
+export const PROXY_HOST = HOST
 
 /** Auto-start proxy on plugin load (default: true) */
 export const DEFAULT_AUTO_START_PROXY = true
@@ -36,3 +33,13 @@ export const AUTO_LOGIN_ENV = 'IFLOW_AUTO_LOGIN'
 
 /** Use ACP environment variable */
 export const USE_ACP_ENV = 'IFLOW_USE_ACP'
+
+/**
+ * Build proxy URL
+ * @param port - The port number (default: PROXY_PORT)
+ * @param host - The host (default: PROXY_HOST)
+ * @returns The full proxy URL
+ */
+export function buildProxyUrl(port: number = PROXY_PORT, host: string = PROXY_HOST): string {
+  return `http://${host}:${port}/v1`
+}

@@ -126,33 +126,35 @@ describe('Tool Loop Simulation (Unit)', () => {
   it('should create correct request after tool result', () => {
     const originalRequest = makeRepoReviewRequest(makeStandardFileTools())
     const toolResult = 'src/\n  index.ts\n  utils.ts\n  handlers/\n'
-    
+
     const nextRequest = makeToolResultRequest(
       originalRequest,
       'call_123',
       'list',
       toolResult
     )
-    
+
     expect(nextRequest.messages).toHaveLength(3) // user, assistant with tool_calls, tool result
-    expect(nextRequest.messages[1].role).toBe('assistant')
-    expect(nextRequest.messages[1].tool_calls).toBeDefined()
-    expect(nextRequest.messages[2].role).toBe('tool')
-    expect(nextRequest.messages[2].content).toBe(toolResult)
+    expect(nextRequest.messages[1]?.role).toBe('assistant')
+    if (nextRequest.messages[1] && 'tool_calls' in nextRequest.messages[1]) {
+      expect(nextRequest.messages[1].tool_calls).toBeDefined()
+    }
+    expect(nextRequest.messages[2]?.role).toBe('tool')
+    expect(nextRequest.messages[2]?.content).toBe(toolResult)
   })
 
   it('should preserve conversation history across tool loops', () => {
     const request1 = makeRepoReviewRequest()
     const request2 = makeToolResultRequest(request1, 'call_1', 'list', 'dir contents')
     const request3 = makeToolResultRequest(request2, 'call_2', 'read', 'file contents')
-    
+
     // Should accumulate messages
     expect(request1.messages).toHaveLength(1)
     expect(request2.messages).toHaveLength(3)
     expect(request3.messages).toHaveLength(5)
-    
+
     // Original message should be preserved
-    expect(request3.messages[0].content).toContain('Revisa')
+    expect(request3.messages[0]?.content).toContain('Revisa')
   })
 
   it('should maintain tools across tool loops', () => {
@@ -181,16 +183,16 @@ describe('Tool Sequence Patterns', () => {
 
   it('should expect read pattern for file query', () => {
     const request = makeReadmeRequest(makeStandardFileTools())
-    
-    expect(request.messages[0].content).toContain('README')
+
+    expect(request.messages[0]?.content).toContain('README')
     expect(request.tools).toBeDefined()
     expect(request.tools?.some((t: any) => t.function.name === 'read')).toBe(true)
   })
 
   it('should expect grep pattern for code search', () => {
     const request = makeGrepRequest(makeStandardFileTools())
-    
-    expect(request.messages[0].content).toContain('IFlowClient')
+
+    expect(request.messages[0]?.content).toContain('IFlowClient')
     expect(request.tools).toBeDefined()
     expect(request.tools?.some((t: any) => t.function.name === 'grep')).toBe(true)
   })
@@ -198,7 +200,7 @@ describe('Tool Sequence Patterns', () => {
   it('should expect edit pattern for code modification', () => {
     const request = makeEditRequest(makeStandardFileTools())
 
-    expect(request.messages[0].content).toContain('Cambia')
+    expect(request.messages[0]?.content).toContain('Cambia')
     expect(request.tools).toBeDefined()
     expect(request.tools?.some((t: any) => t.function.name === 'edit')).toBe(true)
   })

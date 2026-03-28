@@ -3,6 +3,11 @@
  * Import from this file to access all constants
  */
 
+// Core constants (new modular files)
+export * from './limits.js'
+export * from './ports.js'
+export * from './paths.js'
+
 // API constants
 export {
   API_BASE_URL,
@@ -13,7 +18,8 @@ export {
   AXIOS_TIMEOUT_MS,
   USER_AGENT,
   API_KEY_PATTERN,
-  isValidApiKeyFormat
+  isValidApiKeyFormat,
+  buildApiUrlFn
 } from './api.js'
 
 // OAuth constants
@@ -28,6 +34,10 @@ export {
   DEFAULT_OAUTH_PORT_RANGE,
   OAUTH_STATE_BYTES,
   OAUTH_TOKEN_EXPIRY_SECONDS,
+  OAUTH_SERVER_TIMEOUT_MS,
+  ACCESS_TOKEN_REFRESH_BUFFER_MS,
+  LOCKFILE_STALE_MS,
+  LOCKFILE_RETRY_CONFIG,
   buildOAuthCallbackUrl
 } from './oauth.js'
 

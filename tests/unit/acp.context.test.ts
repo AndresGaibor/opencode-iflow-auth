@@ -126,8 +126,8 @@ describe('buildConversationContext', () => {
     ])
     const ctx = buildConversationContext(request)
     expect(ctx.toolMessages).toHaveLength(1)
-    expect(ctx.toolMessages[0].name).toBe('read')
-    expect(ctx.toolMessages[0].content).toBe('file contents')
+    expect(ctx.toolMessages[0]?.name).toBe('read')
+    expect(ctx.toolMessages[0]?.content).toBe('file contents')
   })
 
   it('should detect latestUserMessage', () => {
@@ -156,7 +156,7 @@ describe('buildConversationContext', () => {
       { role: 'tool', name: 'read', content: 'result', arguments: { path: 'test.ts' } },
     ])
     const ctx = buildConversationContext(request)
-    expect(ctx.toolMessages[0].args).toEqual({ path: 'test.ts' })
+    expect(ctx.toolMessages[0]?.args).toEqual({ path: 'test.ts' })
   })
 
   it('should handle empty messages array', () => {
@@ -217,10 +217,11 @@ describe('buildTurnPrompt', () => {
     const conversation = createConversation({
       latestToolResult: { name: 'read', content: 'file contents' },
     })
-    const request = { 
-      messages: [{ role: 'tool', name: 'read', content: 'file contents' }] 
-    } as ChatCompletionRequest
-    
+    const request = {
+      model: 'glm-5',
+      messages: [{ role: 'tool', name: 'read', content: 'file contents' }]
+    } as any as ChatCompletionRequest
+
     const prompt = buildTurnPrompt({ conversation, requestBody: request })
     expect(prompt).toContain('=== Tool Result from OpenCode ===')
     expect(prompt).toContain('Tool: read')
@@ -232,13 +233,13 @@ describe('buildTurnPrompt', () => {
       latestToolResult: { name: 'read', content: 'file contents' },
       latestUserMessage: 'What do you think?',
     })
-    const request = { 
+    const request = {
       messages: [
         { role: 'tool', name: 'read', content: 'file contents' },
         { role: 'user', content: 'What do you think?' },
       ]
     } as ChatCompletionRequest
-    
+
     const prompt = buildTurnPrompt({ conversation, requestBody: request })
     expect(prompt).toContain('=== Tool Result from OpenCode ===')
     expect(prompt).toContain('What do you think?')
@@ -248,8 +249,8 @@ describe('buildTurnPrompt', () => {
     const conversation = createConversation({
       latestUserMessage: '',
     })
-    const request = { messages: [] } as ChatCompletionRequest
-    
+    const request = { messages: [] } as any as ChatCompletionRequest
+
     const prompt = buildTurnPrompt({ conversation, requestBody: request })
     expect(prompt).toBe('Continue.')
   })

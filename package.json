@@ -6,12 +6,13 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
-    "format": "prettier --write --no-config --no-semi --single-quote --trailing-comma none --print-width 100 'src/**/*.ts'",
-    "typecheck": "tsc --noEmit",
-    "test": "vitest run",
-    "test:watch": "vitest",
-    "prepublishOnly": "npm run build"
+    "build": "bun run tsc -p tsconfig.build.json",
+    "format": "bun run prettier --write --no-config --no-semi --single-quote --trailing-comma none --print-width 100 'src/**/*.ts'",
+    "typecheck": "bun run tsc --noEmit",
+    "test": "bun test",
+    "test:watch": "bun test --watch",
+    "test:coverage": "bun test --coverage",
+    "prepublishOnly": "bun run build"
   },
   "keywords": [
     "opencode",
@@ -44,13 +45,17 @@
     "zod": "^3.24.0"
   },
   "devDependencies": {
+    "@types/bun": "^1.2.0",
     "@types/node": "^20.0.0",
     "@types/proper-lockfile": "^4.1.4",
     "prettier": "^3.4.2",
     "prettier-plugin-organize-imports": "^4.1.0",
-    "typescript": "^5.7.3",
-    "vitest": "^3.0.0"
+    "typescript": "^5.7.3"
   },
+  "trustedDependencies": [
+    "@iflow-ai/iflow-cli-sdk",
+    "tiktoken"
+  ],
   "opencode": {
     "type": "plugin",
     "hooks": [

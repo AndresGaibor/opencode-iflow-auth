@@ -3,7 +3,7 @@
  * Routes requests to either CLI handler or direct API based on model
  */
 
-import { requiresCLI } from '../models.js'
+import { requiresCLI } from '../../constants/models.js'
 import { handleDirectAPIRequest } from './handlers/api.js'
 import { handleACPStreamRequest } from './handlers/acp.js'
 import { callIFlowCLI, callIFlowCLIStream } from './handlers/cli.js'

@@ -4,8 +4,9 @@
 
 import { validateApiKey } from '../../iflow/apikey.js'
 import { promptApiKey, promptEmail } from '../cli.js'
-import { AccountManager, generateAccountId } from '../accounts.js'
-import { refreshModelsCache } from '../../iflow/models.js'
+import { AccountManager, generateAccountId } from '../accounts/manager.js'
+import { refreshModelsCache } from '../../iflow/models/cache.js'
+import { fetchModelsFromAPI } from '../../iflow/models/api.js'
 import type { ManagedAccount } from '../types.js'
 import type { IFlowConfig } from '../config/index.js'
 
@@ -22,12 +23,11 @@ export class IFlowApiKeyHandler {
     }
 
     try {
-      await validateApiKey(apiKey)
-      const email = await promptEmail()
+      const result = await validateApiKey(apiKey)
       const am = await AccountManager.loadFromDisk(config.account_selection_strategy)
       const acc: ManagedAccount = {
         id: generateAccountId(),
-        email,
+        email: result.email,
         authMethod: 'apikey',
         apiKey,
         rateLimitResetTime: 0,
@@ -35,7 +35,7 @@ export class IFlowApiKeyHandler {
       }
       am.addAccount(acc)
       await am.saveToDisk()
-      try { await refreshModelsCache(apiKey) } catch {}
+      try { await refreshModelsCache(apiKey, fetchModelsFromAPI) } catch {}
       return { type: 'success' as const, key: apiKey }
     } catch (error: any) {
       return { type: 'failed' as const }

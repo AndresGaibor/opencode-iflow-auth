@@ -13,6 +13,7 @@ import { normalizeToolCall, processACPMessage } from '../../src/iflow/proxy/hand
 describe('Behavior: Repo exploration', () => {
   it('should map list_directory to list (not bash)', () => {
     // When iFlow emits list_directory, it should become 'list' tool
+    // (this tests normalizeToolCall, which happens BEFORE blocking)
     const result = normalizeToolCall('list_directory', { directory: '.' })
     
     expect(result.name).toBe('list')
@@ -20,16 +21,17 @@ describe('Behavior: Repo exploration', () => {
   })
 
   it('should map read_text_file to read', () => {
+    // this tests normalizeToolCall, which happens BEFORE blocking
     const result = normalizeToolCall('read_text_file', { path: 'README.md' })
     
     expect(result.name).toBe('read')
   })
 
   it('should preserve tool sequence in message processing', () => {
-    // Simulate a list tool call message
+    // Using OpenCode-native 'list' tool
     const listMsg = {
-      toolName: 'list_directory',
-      args: { directory: '.' }
+      toolName: 'list',
+      args: { path: '.' }
     }
     
     const result = processACPMessage(listMsg)
@@ -41,13 +43,22 @@ describe('Behavior: Repo exploration', () => {
   })
 
   it('should handle exploration flow: list -> read', () => {
+    // Using OpenCode-native tools
     // First: list
-    const listResult = normalizeToolCall('list_directory', { directory: 'src' })
+    const listResult = normalizeToolCall('list', { path: 'src' })
     expect(listResult.name).toBe('list')
     
     // Then: read
-    const readResult = normalizeToolCall('read_text_file', { path: 'src/index.ts' })
+    const readResult = normalizeToolCall('read', { filePath: 'src/index.ts' })
     expect(readResult.name).toBe('read')
+  })
+  
+  it('should BLOCK iFlow internal tools in strict mode', () => {
+    // iFlow's list_directory should be BLOCKED, not passed through
+    const msg = { toolName: 'list_directory', args: { directory: '.' } }
+    const result = processACPMessage(msg)
+    
+    expect(result.type).toBe('tool_blocked')
   })
 })
 

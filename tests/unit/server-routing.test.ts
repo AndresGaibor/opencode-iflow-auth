@@ -24,7 +24,7 @@ describe('Server Routing Logic', () => {
       ]
       
       expect(expectedModels.length).toBe(4)
-      expect(expectedModels[0].id).toBe('glm-5')
+      expect(expectedModels[0]?.id).toBe('glm-5')
     })
 
     it('should have correct response structure', () => {
@@ -104,28 +104,28 @@ describe('Server Routing Logic', () => {
 
   describe('Method validation', () => {
     it('should accept GET for /v1/models', () => {
-      const method = 'GET'
+      const method: string = 'GET'
       const url = '/v1/models'
       const validMethod = url === '/v1/models' && method === 'GET'
       expect(validMethod).toBe(true)
     })
 
     it('should reject POST for /v1/models', () => {
-      const method = 'POST'
+      const method: string = 'POST'
       const url = '/v1/models'
       const validMethod = url === '/v1/models' && method === 'GET'
       expect(validMethod).toBe(false)
     })
 
     it('should accept POST for /v1/chat/completions', () => {
-      const method = 'POST'
+      const method: string = 'POST'
       const url = '/v1/chat/completions'
       const validMethod = url === '/v1/chat/completions' && method === 'POST'
       expect(validMethod).toBe(true)
     })
 
     it('should reject GET for /v1/chat/completions', () => {
-      const method = 'GET'
+      const method: string = 'GET'
       const url = '/v1/chat/completions'
       const validMethod = url === '/v1/chat/completions' && method === 'POST'
       expect(validMethod).toBe(false)
@@ -186,8 +186,8 @@ describe('Stream Chunk Format', () => {
     }
     
     expect(chunk.object).toBe('chat.completion.chunk')
-    expect(chunk.choices[0].delta.content).toBe('Hello')
-    expect(chunk.choices[0].finish_reason).toBeNull()
+    expect(chunk.choices[0]?.delta.content).toBe('Hello')
+    expect(chunk.choices[0]?.finish_reason).toBeNull()
   })
 
   it('should have correct format for tool_call chunk', () => {
@@ -198,7 +198,7 @@ describe('Stream Chunk Format', () => {
       model: 'glm-5',
       choices: [{
         index: 0,
-        delta: { 
+        delta: {
           tool_calls: [{
             index: 0,
             id: 'call_123',
@@ -212,9 +212,9 @@ describe('Stream Chunk Format', () => {
         finish_reason: 'tool_calls',
       }]
     }
-    
-    expect(chunk.choices[0].finish_reason).toBe('tool_calls')
-    expect(chunk.choices[0].delta.tool_calls).toBeDefined()
+
+    expect(chunk.choices[0]?.finish_reason).toBe('tool_calls')
+    expect(chunk.choices[0]?.delta.tool_calls).toBeDefined()
   })
 
   it('should have correct format for reasoning chunk', () => {
@@ -229,8 +229,8 @@ describe('Stream Chunk Format', () => {
         finish_reason: null,
       }]
     }
-    
-    expect(chunk.choices[0].delta.reasoning_content).toBe('Thinking...')
+
+    expect(chunk.choices[0]?.delta.reasoning_content).toBe('Thinking...')
   })
 
   it('should have correct format for done chunk', () => {
@@ -245,7 +245,7 @@ describe('Stream Chunk Format', () => {
         finish_reason: 'stop',
       }]
     }
-    
-    expect(chunk.choices[0].finish_reason).toBe('stop')
+
+    expect(chunk.choices[0]?.finish_reason).toBe('stop')
   })
 })

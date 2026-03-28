@@ -64,7 +64,7 @@ export async function makeHttpRequest(
   headers?: Record<string, string>
 ): Promise<{ status: number; body: any; headers: Record<string, string> }> {
   const url = new URL(path, baseUrl)
-  
+
   const response = await fetch(url, {
     method,
     headers: {
@@ -81,7 +81,7 @@ export async function makeHttpRequest(
 
   let responseBody: any
   const contentType = response.headers.get('content-type') || ''
-  
+
   if (contentType.includes('application/json')) {
     responseBody = await response.json()
   } else if (contentType.includes('text/event-stream')) {
@@ -96,6 +96,11 @@ export async function makeHttpRequest(
     headers: responseHeaders,
   }
 }
+
+/**
+ * Alias for makeHttpRequest - legacy name for compatibility
+ */
+export const makeRequest = makeHttpRequest
 
 /**
  * Helper to collect SSE chunks from a streaming response.

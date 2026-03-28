@@ -94,13 +94,13 @@ describe('Plugin Structure', () => {
     }
     
     const hooks = await IFlowPlugin(mockInput as any)
-    
-    expect(hooks.auth.provider).toBe('iflow')
+
+    expect(hooks.auth?.provider).toBe('iflow')
   })
 
   it('should have auth.loader function', async () => {
     const { IFlowPlugin } = await import('../../src/index.js')
-    
+
     const mockInput = {
       client: {
         tui: {
@@ -108,15 +108,15 @@ describe('Plugin Structure', () => {
         },
       },
     }
-    
+
     const hooks = await IFlowPlugin(mockInput as any)
-    
-    expect(typeof hooks.auth.loader).toBe('function')
+
+    expect(typeof hooks.auth?.loader).toBe('function')
   })
 
   it('should have auth.methods array', async () => {
     const { IFlowPlugin } = await import('../../src/index.js')
-    
+
     const mockInput = {
       client: {
         tui: {
@@ -124,11 +124,11 @@ describe('Plugin Structure', () => {
         },
       },
     }
-    
+
     const hooks = await IFlowPlugin(mockInput as any)
-    
-    expect(Array.isArray(hooks.auth.methods)).toBe(true)
-    expect(hooks.auth.methods.length).toBeGreaterThan(0)
+
+    expect(Array.isArray(hooks.auth?.methods)).toBe(true)
+    expect(hooks.auth?.methods.length).toBeGreaterThan(0)
   })
 
   it('should have OAuth method', async () => {
@@ -143,15 +143,15 @@ describe('Plugin Structure', () => {
     }
     
     const hooks = await IFlowPlugin(mockInput as any)
-    
-    const oauthMethod = hooks.auth.methods.find(m => m.type === 'oauth')
+
+    const oauthMethod = hooks.auth?.methods.find(m => m.type === 'oauth')
     expect(oauthMethod).toBeDefined()
     expect(oauthMethod?.label).toContain('OAuth')
   })
 
   it('should have API key method', async () => {
     const { IFlowPlugin } = await import('../../src/index.js')
-    
+
     const mockInput = {
       client: {
         tui: {
@@ -159,17 +159,17 @@ describe('Plugin Structure', () => {
         },
       },
     }
-    
+
     const hooks = await IFlowPlugin(mockInput as any)
-    
-    const apiMethod = hooks.auth.methods.find(m => m.type === 'api')
+
+    const apiMethod = hooks.auth?.methods.find(m => m.type === 'api')
     expect(apiMethod).toBeDefined()
     expect(apiMethod?.label).toContain('API Key')
   })
 
   it('should have chat.headers hook', async () => {
     const { IFlowPlugin } = await import('../../src/index.js')
-    
+
     const mockInput = {
       client: {
         tui: {
@@ -177,15 +177,15 @@ describe('Plugin Structure', () => {
         },
       },
     }
-    
+
     const hooks = await IFlowPlugin(mockInput as any)
-    
+
     expect(typeof hooks['chat.headers']).toBe('function')
   })
 
   it('should set User-Agent header in chat.headers', async () => {
     const { IFlowPlugin } = await import('../../src/index.js')
-    
+
     const mockInput = {
       client: {
         tui: {
@@ -193,15 +193,18 @@ describe('Plugin Structure', () => {
         },
       },
     }
-    
+
     const hooks = await IFlowPlugin(mockInput as any)
-    
-    const output = { headers: {} }
-    await hooks['chat.headers']({}, output)
-    
-    expect(output.headers['User-Agent']).toBeDefined()
-    // User-Agent contains iFlow (case may vary)
-    expect(output.headers['User-Agent'].toLowerCase()).toContain('iflow')
+
+    const output: any = { headers: {} }
+    const chatHeadersHook = hooks['chat.headers']
+    if (chatHeadersHook) {
+      await chatHeadersHook({} as any, output)
+
+      expect(output.headers['User-Agent']).toBeDefined()
+      // User-Agent contains iFlow (case may vary)
+      expect(output.headers['User-Agent'].toLowerCase()).toContain('iflow')
+    }
   })
 })
 
@@ -229,8 +232,8 @@ describe('Plugin-Proxy Exports', () => {
     }
     
     const hooks = await IFlowProxyPlugin(mockInput as any)
-    
-    expect(hooks.auth.provider).toBe('iflow-proxy')
+
+    expect(hooks.auth?.provider).toBe('iflow-proxy')
   })
 })
 

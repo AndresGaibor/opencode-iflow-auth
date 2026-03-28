@@ -114,3 +114,4 @@ export type ACPProcessingResult =
   | { type: 'content'; content: string; reasoning?: string }
   | { type: 'done'; reasoning?: string }
   | { type: 'noop'; reasoning?: string }
+  | { type: 'tool_blocked'; originalName: string; originalArgs?: Record<string, any>; reason: string; reasoning?: string }

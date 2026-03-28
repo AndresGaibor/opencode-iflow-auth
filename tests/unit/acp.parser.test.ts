@@ -283,14 +283,16 @@ describe('isACPDoneMessage', () => {
 describe('processACPMessage', () => {
   it('should process native tool call with priority', () => {
     const msg = {
-      toolName: 'read_text_file',
-      args: { path: 'test.ts' }
+      toolName: 'read',
+      args: { filePath: 'test.ts' }
     }
     const result = processACPMessage(msg)
-    
+
     expect(result.type).toBe('tool_call')
-    expect(result.toolCall!.name).toBe('read') // Normalized
-    expect(result.toolCall!.args.filePath).toBe('test.ts')
+    if (result.type === 'tool_call') {
+      expect(result.toolCall.name).toBe('read')
+      expect(result.toolCall.args.filePath).toBe('test.ts')
+    }
   })
 
   it('should process fallback textual tool call', () => {
@@ -298,9 +300,11 @@ describe('processACPMessage', () => {
       chunk: { text: '<<USA_TOOL>>list{"path": "."}<</USA_TOOL>>' }
     }
     const result = processACPMessage(msg)
-    
+
     expect(result.type).toBe('tool_call')
-    expect(result.toolCall!.name).toBe('list')
+    if (result.type === 'tool_call') {
+      expect(result.toolCall.name).toBe('list')
+    }
   })
 
   it('should process content message', () => {
@@ -308,9 +312,11 @@ describe('processACPMessage', () => {
       chunk: { text: 'This is a response' }
     }
     const result = processACPMessage(msg)
-    
+
     expect(result.type).toBe('content')
-    expect(result.content).toBe('This is a response')
+    if (result.type === 'content') {
+      expect(result.content).toBe('This is a response')
+    }
   })
 
   it('should process done message', () => {
@@ -328,7 +334,7 @@ describe('processACPMessage', () => {
   it('should extract reasoning from tool call message', () => {
     const msg = {
       toolName: 'read',
-      args: { path: 'test.ts' },
+      args: { filePath: 'test.ts' },
       chunk: { thought: 'Need to read the file' }
     }
     const result = processACPMessage(msg)
@@ -354,27 +360,17 @@ describe('processACPMessage', () => {
     // If a message has both native tool call AND text with <<USA_TOOL>>,
     // native should win
     const msg = {
-      toolName: 'read_text_file',
-      args: { path: 'real.ts' },
+      toolName: 'read',
+      args: { filePath: 'real.ts' },
       chunk: { text: '<<USA_TOOL>>write{"path": "fake.ts"}<</USA_TOOL>>' }
     }
     const result = processACPMessage(msg)
-    
-    expect(result.type).toBe('tool_call')
-    expect(result.toolCall!.name).toBe('read') // Native, not write
-    expect(result.toolCall!.args.filePath).toBe('real.ts')
-  })
 
-  it('should normalize tool calls', () => {
-    const msg = {
-      toolName: 'list_directory',
-      args: { directory: '.' }
-    }
-    const result = processACPMessage(msg)
-    
     expect(result.type).toBe('tool_call')
-    expect(result.toolCall!.name).toBe('list') // Normalized from list_directory
-    expect(result.toolCall!.args.path).toBe('.') // directory -> path
+    if (result.type === 'tool_call') {
+      expect(result.toolCall.name).toBe('read') // Native, not write
+      expect(result.toolCall.args.filePath).toBe('real.ts')
+    }
   })
 
   it('should return noop for unrecognized message', () => {
@@ -382,5 +378,68 @@ describe('processACPMessage', () => {
     const result = processACPMessage(msg)
     
     expect(result.type).toBe('noop')
+  })
+  
+  // Tests for strict mode blocking behavior
+  describe('strict mode blocking (default)', () => {
+    it('should BLOCK iFlow tools like read_text_file in strict mode', () => {
+      const msg = {
+        toolName: 'read_text_file',
+        args: { path: 'test.ts' }
+      }
+      const result = processACPMessage(msg) // strictMode defaults to true
+      
+      expect(result.type).toBe('tool_blocked')
+    })
+    
+    it('should BLOCK list_directory in strict mode', () => {
+      const msg = {
+        toolName: 'list_directory',
+        args: { directory: '.' }
+      }
+      const result = processACPMessage(msg)
+      
+      expect(result.type).toBe('tool_blocked')
+    })
+    
+    it('should BLOCK task (subagents) in strict mode', () => {
+      const msg = {
+        toolName: 'task',
+        args: { description: 'Explore', prompt: 'Find files' }
+      }
+      const result = processACPMessage(msg)
+      
+      expect(result.type).toBe('tool_blocked')
+    })
+  })
+  
+  describe('non-strict mode (strictMode: false)', () => {
+    it('should normalize iFlow tools when strictMode is false', () => {
+      const msg = {
+        toolName: 'read_text_file',
+        args: { path: 'test.ts' }
+      }
+      const result = processACPMessage(msg, { strictMode: false })
+
+      expect(result.type).toBe('tool_call')
+      if (result.type === 'tool_call') {
+        expect(result.toolCall.name).toBe('read') // Normalized
+        expect(result.toolCall.args.filePath).toBe('test.ts')
+      }
+    })
+
+    it('should normalize list_directory when strictMode is false', () => {
+      const msg = {
+        toolName: 'list_directory',
+        args: { directory: '.' }
+      }
+      const result = processACPMessage(msg, { strictMode: false })
+
+      expect(result.type).toBe('tool_call')
+      if (result.type === 'tool_call') {
+        expect(result.toolCall.name).toBe('list') // Normalized from list_directory
+        expect(result.toolCall.args.path).toBe('.') // directory -> path
+      }
+    })
   })
 })

@@ -34,6 +34,8 @@ export const LOG_FILES = {
   OPENAI_TOOL_RESULTS: 'openai-tool-results.ndjson',
   SESSION_MAP: 'session-map.ndjson',
   ERRORS: 'errors.ndjson',
+  TOOL_POLICY: 'tool-policy.ndjson',
+  TOOL_MAPPING: 'tool-mapping.ndjson',
 } as const
 
 // Ensure log directory exists
@@ -256,10 +258,26 @@ export function logToolCallEmitted(params: {
   chatId: string
   originalToolCall?: { name: string; args: any }
   normalizedToolCall: { name: string; args: any }
-  source: 'native_acp' | 'textual_fallback' | 'unknown'
+  source: ToolCallSource
   finishReason: string
 }): void {
   const { sessionKey, turnId, model, chatId, originalToolCall, normalizedToolCall, source, finishReason } = params
+  
+  // Determine the actual source classification
+  const actualSource: ToolCallSource = source
+  
+  // Log the complete mapping
+  logToolMapping({
+    sessionKey,
+    turnId,
+    model,
+    source: actualSource,
+    toolNameOriginal: originalToolCall?.name || normalizedToolCall.name,
+    toolNameEmitted: normalizedToolCall.name,
+    argsOriginal: originalToolCall?.args || {},
+    argsEmitted: normalizedToolCall.args,
+    blockedByPolicy: false,
+  })
   
   logJson(LOG_FILES.OPENAI_TOOL_CALLS, {
     ts: new Date().toISOString(),
@@ -268,10 +286,17 @@ export function logToolCallEmitted(params: {
     turnId,
     model,
     chatId,
+    // New required fields
+    source: actualSource,
+    tool_name_original: originalToolCall?.name,
+    tool_name_emitted: normalizedToolCall.name,
+    args_original: originalToolCall?.args,
+    args_emitted: normalizedToolCall.args,
+    blocked_by_policy: false,
+    // Legacy fields for backward compatibility
     toolName: normalizedToolCall.name,
     args: normalizedToolCall.args,
     argsJson: JSON.stringify(normalizedToolCall.args),
-    source,
     finishReason,
     originalName: originalToolCall?.name,
     originalArgs: originalToolCall?.args,
@@ -340,8 +365,8 @@ export function logProcessingResult(params: {
   sessionKey: string
   turnId: string
   model: string
-  resultType: 'tool_call' | 'content' | 'done' | 'noop'
-  source?: 'native_acp' | 'textual_fallback'
+  resultType: 'tool_call' | 'content' | 'done' | 'noop' | 'tool_blocked'
+  source?: 'native_acp' | 'textual_fallback' | 'native_iflow' | 'fallback_text'
   toolName?: string
   contentLength?: number
   hasReasoning?: boolean
@@ -360,7 +385,7 @@ export function logError(params: {
   sessionKey?: string
   turnId?: string
   model?: string
-  errorType: 'exception' | 'contract_mismatch' | 'permission_blocked' | 'validation_error' | 'other'
+  errorType: 'exception' | 'contract_mismatch' | 'permission_blocked' | 'validation_error' | 'tool_blocked' | 'other'
   message: string
   details?: Record<string, any>
 }): void {
@@ -468,6 +493,159 @@ export function validateToolCallContract(params: {
   }
   
   return { valid: issues.length === 0, issues }
+}
+
+// ============================================================================
+// TOOL POLICY & MAPPING LOGGING
+// ============================================================================
+
+/**
+ * Source classification for tool calls
+ */
+export type ToolCallSource = 'native_iflow' | 'mapped_opencode' | 'fallback_text' | 'unknown'
+
+/**
+ * Log when a tool blocking check is performed
+ */
+export function logToolBlockCheck(params: {
+  sessionKey: string
+  turnId: string
+  model: string
+  toolNameOriginal: string
+  argsOriginal?: Record<string, any>
+  blockedByPolicy: boolean
+  reason?: string
+}): void {
+  const { sessionKey, turnId, model, toolNameOriginal, argsOriginal, blockedByPolicy, reason } = params
+  
+  logJson(LOG_FILES.TOOL_POLICY, {
+    ts: new Date().toISOString(),
+    event: 'iflow_tool_block_check',
+    sessionKey,
+    turnId,
+    model,
+    toolNameOriginal,
+    argsOriginal,
+    blockedByPolicy,
+    reason,
+  })
+}
+
+/**
+ * Log when a tool is actually blocked by policy
+ */
+export function logToolBlocked(params: {
+  sessionKey: string
+  turnId: string
+  model: string
+  toolNameOriginal: string
+  argsOriginal: Record<string, any>
+  reason: string
+}): void {
+  const { sessionKey, turnId, model, toolNameOriginal, argsOriginal, reason } = params
+  
+  logJson(LOG_FILES.TOOL_POLICY, {
+    ts: new Date().toISOString(),
+    event: 'iflow_tool_block_failed',
+    sessionKey,
+    turnId,
+    model,
+    toolNameOriginal,
+    argsOriginal,
+    blockedByPolicy: true,
+    reason,
+  })
+  
+  // Also log to errors for visibility
+  logError({
+    sessionKey,
+    turnId,
+    model,
+    errorType: 'tool_blocked',
+    message: `Tool '${toolNameOriginal}' blocked by policy: ${reason}`,
+    details: { toolNameOriginal, argsOriginal, reason },
+  })
+}
+
+/**
+ * Log when a native iFlow tool is allowed to pass through (should not happen in strict mode)
+ */
+export function logNativeToolPassthrough(params: {
+  sessionKey: string
+  turnId: string
+  model: string
+  toolName: string
+  args: Record<string, any>
+}): void {
+  const { sessionKey, turnId, model, toolName, args } = params
+  
+  logJson(LOG_FILES.TOOL_POLICY, {
+    ts: new Date().toISOString(),
+    event: 'iflow_native_tool_passthrough',
+    sessionKey,
+    turnId,
+    model,
+    toolName,
+    args,
+    blockedByPolicy: false,
+  })
+}
+
+/**
+ * Log when an OpenCode tool is emitted
+ */
+export function logOpenCodeToolEmitted(params: {
+  sessionKey: string
+  turnId: string
+  model: string
+  toolName: string
+  args: Record<string, any>
+  source: ToolCallSource
+}): void {
+  const { sessionKey, turnId, model, toolName, args, source } = params
+  
+  logJson(LOG_FILES.TOOL_POLICY, {
+    ts: new Date().toISOString(),
+    event: 'opencode_tool_emitted',
+    sessionKey,
+    turnId,
+    model,
+    toolName,
+    args,
+    source,
+    blockedByPolicy: false,
+  })
+}
+
+/**
+ * Log the complete tool mapping transformation
+ */
+export function logToolMapping(params: {
+  sessionKey: string
+  turnId: string
+  model: string
+  source: ToolCallSource
+  toolNameOriginal: string
+  toolNameEmitted: string
+  argsOriginal: Record<string, any>
+  argsEmitted: Record<string, any>
+  blockedByPolicy: boolean
+}): void {
+  const { sessionKey, turnId, model, source, toolNameOriginal, toolNameEmitted, argsOriginal, argsEmitted, blockedByPolicy } = params
+  
+  logJson(LOG_FILES.TOOL_MAPPING, {
+    ts: new Date().toISOString(),
+    event: 'tool_mapping_applied',
+    sessionKey,
+    turnId,
+    model,
+    source,
+    toolNameOriginal,
+    toolNameEmitted,
+    argsOriginal,
+    argsEmitted,
+    blockedByPolicy,
+  })
 }
 
 // ============================================================================

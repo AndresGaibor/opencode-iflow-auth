@@ -27,7 +27,7 @@ export class FakeIFlowClient {
   private scripts: FakeIFlowEvent[][]
   private currentScriptIndex = 0
   private messagesSent: string[] = []
-  private config: Record<string, any> = {}
+  private _config: Record<string, any> = {}
 
   constructor(options: FakeIFlowClientOptions) {
     this.scripts = options.scripts || []
@@ -37,7 +37,7 @@ export class FakeIFlowClient {
   }
 
   // IFlowClient interface implementation
-  
+
   async connect(): Promise<void> {
     this.connected = true
   }
@@ -57,7 +57,7 @@ export class FakeIFlowClient {
   async *receiveMessages(): AsyncGenerator<any> {
     const script = this.scripts[this.currentScriptIndex] || []
     this.currentScriptIndex++
-    
+
     for (const event of script) {
       yield this.convertEventToMessage(event)
     }
@@ -66,9 +66,9 @@ export class FakeIFlowClient {
   get config() {
     return {
       set: async (key: string, value: any) => {
-        this.config[key] = value
+        this._config[key] = value
       },
-      get: (key: string) => this.config[key],
+      get: (key: string) => this._config[key],
     }
   }
 

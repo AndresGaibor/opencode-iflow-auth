@@ -3,13 +3,14 @@
  * Eliminates duplication between plugin-iflow and plugin-proxy
  */
 
-import { authorizeIFlowOAuth, exchangeOAuthCode } from '../../iflow/oauth.js'
+import { authorizeIFlowOAuth, exchangeOAuthCode, fetchUserInfo } from '../../iflow/oauth.js'
 import { isHeadlessEnvironment } from '../headless.js'
 import { startOAuthServer } from '../server.js'
-import { openBrowser } from '../utils/browser.js'
+import { openBrowser } from '../browser.js'
 import { parseCallbackInput } from './utils.js'
-import { AccountManager, generateAccountId } from '../accounts.js'
-import { refreshModelsCache } from '../../iflow/models.js'
+import { AccountManager, generateAccountId } from '../accounts/manager.js'
+import { refreshModelsCache } from '../../iflow/models/cache.js'
+import { fetchModelsFromAPI } from '../../iflow/models/api.js'
 import type { ManagedAccount } from '../types.js'
 import type { IFlowConfig } from '../config/index.js'
 
@@ -35,9 +36,12 @@ export class IFlowOAuthHandler {
             callback: async (codeInput: string) => {
               try {
                 const code = parseCallbackInput(codeInput)
+                if (!code) {
+                  throw new Error('Invalid callback input')
+                }
                 const res = await exchangeOAuthCode(code, authData.redirectUri)
                 await saveAccount(res, config)
-                try { await refreshModelsCache(res.apiKey) } catch {}
+                try { await refreshModelsCache(res.apiKey, fetchModelsFromAPI) } catch {}
                 showToast(`Successfully logged in as ${res.email}`, 'success')
                 return { type: 'success' as const, key: res.apiKey }
               } catch (e: any) {
@@ -63,7 +67,7 @@ export class IFlowOAuthHandler {
               try {
                 const res = await waitForAuth()
                 await saveAccount(res, config)
-                try { await refreshModelsCache(res.apiKey) } catch {}
+                try { await refreshModelsCache(res.apiKey, fetchModelsFromAPI) } catch {}
                 showToast(`Successfully logged in as ${res.email}`, 'success')
                 return { type: 'success' as const, key: res.apiKey }
               } catch (e: any) {

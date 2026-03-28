@@ -1,27 +1,23 @@
 import { promises as fs } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { randomBytes } from 'node:crypto'
-import { homedir } from 'node:os'
 import lockfile from 'proper-lockfile'
 import type { AccountStorage } from './types.js'
 import * as logger from './logger.js'
+import { getAccountsStoragePath } from '../constants/paths.js'
+import { LOCKFILE_STALE_MS, LOCKFILE_RETRY_CONFIG } from '../constants/limits.js'
 
 const LOCK_OPTIONS = {
-  stale: 10000,
-  retries: { retries: 5, minTimeout: 100, maxTimeout: 1000, factor: 2 }
+  stale: LOCKFILE_STALE_MS,
+  retries: LOCKFILE_RETRY_CONFIG
 }
 
-function getBaseDir(): string {
-  const platform = process.platform
-  if (platform === 'win32') {
-    return join(process.env.APPDATA || join(homedir(), 'AppData', 'Roaming'), 'opencode')
-  }
-  const xdgConfig = process.env.XDG_CONFIG_HOME || join(homedir(), '.config')
-  return join(xdgConfig, 'opencode')
-}
-
+/**
+ * Get the storage file path (re-exported for backward compatibility)
+ * @returns Path to the accounts storage file
+ */
 export function getStoragePath(): string {
-  return join(getBaseDir(), 'iflow-accounts.json')
+  return getAccountsStoragePath()
 }
 
 async function withLock<T>(path: string, fn: () => Promise<T>): Promise<T> {
