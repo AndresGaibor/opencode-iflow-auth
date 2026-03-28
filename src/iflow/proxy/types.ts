@@ -66,3 +66,51 @@ export interface CLIStatus {
   error?: string
   apiKey?: string
 }
+
+// Session management types
+import type { IFlowClient } from '@iflow-ai/iflow-cli-sdk'
+
+export interface SessionState {
+  sessionKey: string
+  model: string
+  client: IFlowClient
+  createdAt: number
+  lastActivityAt: number
+  initialized: boolean
+  cwd?: string
+  workspaceRoot?: string
+  toolSchemaHash?: string
+}
+
+export interface ConversationContext {
+  systemMessages: string[]
+  userMessages: string[]
+  assistantMessages: string[]
+  toolMessages: Array<{
+    name?: string
+    content: string
+    args?: Record<string, any>
+  }>
+  latestUserMessage: string
+  latestToolResult?: {
+    name: string
+    content: string
+    args?: Record<string, any>
+  }
+}
+
+export interface NormalizedToolCall {
+  name: string
+  args: Record<string, any>
+}
+
+export interface ToolCallMessage {
+  name: string
+  args: Record<string, any>
+}
+
+export type ACPProcessingResult =
+  | { type: 'tool_call'; toolCall: NormalizedToolCall; reasoning?: string }
+  | { type: 'content'; content: string; reasoning?: string }
+  | { type: 'done'; reasoning?: string }
+  | { type: 'noop'; reasoning?: string }

@@ -1,9 +1,16 @@
 import { ServerResponse } from 'http'
-import { randomUUID } from 'crypto'
+import { randomUUID, createHash } from 'crypto'
 import { IFlowClient, PermissionMode, MessageType, ToolCallStatus } from '@iflow-ai/iflow-cli-sdk'
 import * as logger from '../../../plugin/logger.js'
 import { log } from '../utils.js'
-import type { ChatCompletionRequest, StreamChunk } from '../types.js'
+import type { 
+  ChatCompletionRequest, 
+  StreamChunk, 
+  SessionState, 
+  ConversationContext,
+  NormalizedToolCall,
+  ACPProcessingResult 
+} from '../types.js'
 import fs from 'fs'
 import path from 'path'
 import os from 'os'
@@ -23,6 +30,57 @@ function fileLog(message: string) {
   } catch (e) {
     console.error('Failed to write to acp-proxy.log', e)
   }
+}
+
+// ============================================================================
+// SESSION STORE
+// ============================================================================
+
+const acpSessions = new Map<string, SessionState>()
+const SESSION_TTL_MS = 1000 * 60 * 30 // 30 minutes
+
+function cleanupExpiredSessions(): void {
+  const now = Date.now()
+  for (const [key, session] of acpSessions.entries()) {
+    if (now - session.lastActivityAt > SESSION_TTL_MS) {
+      try {
+        session.client?.disconnect?.()
+      } catch {}
+      acpSessions.delete(key)
+      fileLog(`[SESSION CLEANUP] Removed expired session: ${key.substring(0, 8)}...`)
+    }
+  }
+}
+
+function hashString(input: string): string {
+  return createHash('sha256').update(input).digest('hex').substring(0, 16)
+}
+
+function makeSessionKey(requestBody: ChatCompletionRequest): string {
+  const model = requestBody?.model || 'unknown'
+  const msgs = Array.isArray(requestBody?.messages) ? requestBody.messages : []
+  
+  // Create stable key from first few messages + model
+  const seed = JSON.stringify({
+    model,
+    firstMessages: msgs.slice(0, 6).map((m: any) => ({
+      role: m.role,
+      content: typeof m.content === 'string' 
+        ? m.content.substring(0, 200) 
+        : JSON.stringify(m.content).substring(0, 200),
+    })),
+  })
+  
+  return hashString(seed)
+}
+
+function hashToolSchema(tools: any[]): string {
+  if (!tools || tools.length === 0) return 'none'
+  const schema = tools.map(t => {
+    const fn = t.function || t
+    return `${fn.name}:${Object.keys(fn.parameters?.properties || {}).join(',')}`
+  }).join('|')
+  return hashString(schema)
 }
 
 // Tools internas de iflow que deben ser desactivadas para usar las de OpenCode
@@ -52,14 +110,194 @@ const IFLOW_INTERNAL_TOOLS = [
   'grep'
 ]
 
-function normalizeToolCall(name: string, args: any): { name: string; args: any } {
+// ============================================================================
+// CONVERSATION CONTEXT BUILDERS
+// ============================================================================
+
+function extractTextContent(message: any): string {
+  if (!message) return ''
+  if (typeof message.content === 'string') return message.content
+
+  if (Array.isArray(message.content)) {
+    return message.content
+      .map((part: any) => {
+        if (typeof part === 'string') return part
+        if (part?.type === 'text') return part.text || ''
+        return ''
+      })
+      .filter(Boolean)
+      .join('\n')
+  }
+
+  return ''
+}
+
+function buildConversationContext(requestBody: ChatCompletionRequest): ConversationContext {
+  const messages = Array.isArray(requestBody?.messages) ? requestBody.messages : []
+
+  const systemMessages: string[] = []
+  const userMessages: string[] = []
+  const assistantMessages: string[] = []
+  const toolMessages: Array<{ name?: string; content: string; args?: Record<string, any> }> = []
+
+  for (const msg of messages) {
+    const content = extractTextContent(msg)
+
+    if (msg.role === 'system') {
+      systemMessages.push(content)
+    } else if (msg.role === 'user') {
+      userMessages.push(content)
+    } else if (msg.role === 'assistant') {
+      assistantMessages.push(content)
+    } else if (msg.role === 'tool') {
+      const toolMsg = msg as any
+      toolMessages.push({
+        name: toolMsg.name,
+        content,
+        args: toolMsg.arguments,
+      })
+    }
+  }
+
+  const lastToolMsg = toolMessages[toolMessages.length - 1]
+  const latestToolResult = lastToolMsg
+    ? { name: lastToolMsg.name || 'tool', content: lastToolMsg.content, args: lastToolMsg.args }
+    : undefined
+
+  return {
+    systemMessages,
+    userMessages,
+    assistantMessages,
+    toolMessages,
+    latestUserMessage: userMessages[userMessages.length - 1] || '',
+    latestToolResult,
+  }
+}
+
+// ============================================================================
+// SYSTEM PROMPT BUILDER
+// ============================================================================
+
+function buildOpenCodeCompatPrompt(
+  tools: any[],
+  ctx?: { cwd?: string; workspaceRoot?: string }
+): string {
+  const toolDefs = tools
+    .map((t: any) => {
+      const fn = t.function || t
+      const params = fn.parameters?.properties || {}
+      const required = fn.parameters?.required || []
+      
+      const paramsList = Object.entries(params)
+        .map(([name, schema]: [string, any]) => {
+          const req = required.includes(name) ? ' (required)' : ' (optional)'
+          return `    - ${name}${req}: ${schema.description || schema.type || 'value'}`
+        })
+        .join('\n')
+      
+      return `  - ${fn.name}${paramsList ? '\n' + paramsList : ''}`
+    })
+    .join('\n\n')
+
+  return `
+You are operating inside OpenCode as a coding assistant.
+Behave like a native OpenCode model.
+
+Environment:
+- Current working directory: ${ctx?.cwd || 'unknown'}
+- Workspace root: ${ctx?.workspaceRoot || 'unknown'}
+
+You have access to OpenCode's native tools.
+Prefer OpenCode tools over any internal tool behavior.
+
+When a user asks about a project or repository:
+1. INSPECT the repository first using exploration tools
+2. Prefer tools in this order: list, glob, grep, read
+3. Only summarize AFTER exploration
+
+Tool behavior rules:
+- Use 'list' for directory contents
+- Use 'glob' to discover files by pattern
+- Use 'grep' to search text or symbol usage
+- Use 'read' to inspect file contents
+- Use 'edit' for precise string replacements (requires oldString, newString, filePath)
+- Use 'write' for whole-file writes only when necessary
+- Use 'bash' only if no native tool is suitable
+
+Do NOT respond with generic acknowledgment like "I understand" when inspection is needed.
+Do NOT stop at "I'm ready to help".
+Inspect the codebase first, then provide your response.
+
+Available OpenCode tools:
+${toolDefs}
+`.trim()
+}
+
+function buildTurnPrompt({
+  conversation,
+  requestBody,
+}: {
+  conversation: ConversationContext
+  requestBody: ChatCompletionRequest
+}): string {
+  const lastMsg = Array.isArray(requestBody?.messages)
+    ? requestBody.messages[requestBody.messages.length - 1]
+    : null
+
+  // If the last message is a tool result, format it properly
+  if (lastMsg?.role === 'tool' && conversation.latestToolResult) {
+    return formatToolResultForIFlow({
+      toolName: conversation.latestToolResult.name,
+      args: conversation.latestToolResult.args || {},
+      output: conversation.latestToolResult.content,
+      isError: false,
+    })
+  }
+
+  // If there's a tool result followed by a user message
+  if (conversation.latestToolResult && conversation.latestUserMessage) {
+    const toolResultText = formatToolResultForIFlow({
+      toolName: conversation.latestToolResult.name,
+      args: conversation.latestToolResult.args || {},
+      output: conversation.latestToolResult.content,
+      isError: false,
+    })
+    return `${toolResultText}\n\nUser: ${conversation.latestUserMessage}`
+  }
+
+  // Normal user turn
+  return conversation.latestUserMessage || 'Continue.'
+}
+
+function formatToolResultForIFlow(input: {
+  toolName: string
+  args: any
+  output: string
+  isError?: boolean
+}): string {
+  return [
+    '=== Tool Result from OpenCode ===',
+    `Tool: ${input.toolName}`,
+    `Arguments: ${JSON.stringify(input.args || {})}`,
+    `Status: ${input.isError ? 'error' : 'success'}`,
+    'Output:',
+    input.output || '(no output)',
+    '=== End Tool Result ===',
+  ].join('\n')
+}
+
+// ============================================================================
+// TOOL NORMALIZATION (OpenCode Schemas)
+// ============================================================================
+
+function normalizeToolCall(name: string, args: any): NormalizedToolCall {
   const originalName = name
   const originalArgs = JSON.stringify(args)
   
-  let mappedName = name
-  let mappedArgs = { ...args }
+  let mappedName = name.trim()
+  let mappedArgs = args || {}
 
-  // 1. Tool Redirection
+  // Tool name redirection
   if (['run_shell_command', 'execute_command', 'run_command', 'shell', 'terminal', 'bash_execute'].includes(mappedName)) {
     mappedName = 'bash'
   } else if (['read_text_file', 'read_file', 'cat', 'getFile'].includes(mappedName)) {
@@ -70,159 +308,189 @@ function normalizeToolCall(name: string, args: any): { name: string; args: any }
     mappedName = 'edit'
   } else if (['search_web', 'fetch_url', 'curl'].includes(mappedName)) {
     mappedName = 'webfetch'
-  } else if (mappedName === 'list_directory_with_sizes' || mappedName === 'list_directory' || mappedName === 'ls' || mappedName === 'list_dir') {
-    mappedName = 'bash'
-    mappedArgs = {
-      command: `ls -lh ${args?.filePath || args?.path || args?.directory || '.'}`,
-      description: `Listing directory: ${args?.filePath || args?.path || args?.directory || '.'}`,
-      run_in_background: false
-    }
-    fileLog(`[TOOL NORMALIZATION] Redirected ${originalName} -> bash (ls)`)
-    return { name: mappedName, args: mappedArgs }
+  } else if (['list_directory_with_sizes', 'list_directory', 'ls', 'list_dir', 'directory_tree'].includes(mappedName)) {
+    // IMPORTANT: list_directory maps to 'list', NOT 'bash ls'
+    mappedName = 'list'
+  } else if (['find_files', 'glob_search', 'file_glob'].includes(mappedName)) {
+    mappedName = 'glob'
+  } else if (['search_files', 'file_search', 'find_in_files'].includes(mappedName)) {
+    mappedName = 'grep'
   }
 
   if (mappedName !== originalName) {
     fileLog(`[TOOL NORMALIZATION] Mapped tool name: ${originalName} -> ${mappedName}`)
   }
 
-  // 2. Argument Normalization (Rename hallucinations)
-  
-  // Bash/Task fixes
-  if (mappedName === 'bash' || mappedName === 'task' || mappedName === 'task_create' || mappedName === 'explore-agent') {
-    if (mappedName === 'bash' && !mappedArgs.command && mappedArgs.script) {
-      mappedArgs.command = mappedArgs.script
-      fileLog(`[TOOL NORMALIZATION] Fixed bash argument: script -> command`)
-    }
-    if (mappedArgs.run_in_background === undefined) {
-      mappedArgs.run_in_background = false
-      fileLog(`[TOOL NORMALIZATION] Injected missing required parameter: run_in_background=false into ${mappedName}`)
-    }
-    if (mappedArgs.load_skills === undefined) {
-      mappedArgs.load_skills = []
-      fileLog(`[TOOL NORMALIZATION] Injected missing required parameter: load_skills=[] into ${mappedName}`)
-    }
-    if (!mappedArgs.description) {
-      mappedArgs.description = `Executing: ${mappedName}`
-      fileLog(`[TOOL NORMALIZATION] Injected missing parameter: description into ${mappedName}`)
-    }
-  }
-  
-  // Read fixes (OpenCode expects filePath)
-  if (mappedName === 'read') {
-    // If we have NO filePath but we have some other path-like variable, move it
-    if (!mappedArgs.filePath) {
-      const pathValue = mappedArgs.path || mappedArgs.absolute_path || mappedArgs.file || mappedArgs.filename || mappedArgs.uri
-      if (pathValue) {
-        mappedArgs.filePath = pathValue
-        fileLog(`[TOOL NORMALIZATION] Aggressive read mapping: detected path-like argument and assigned to filePath`)
-      }
-    }
-  }
-  
-  // Write/Edit fixes
-  if (mappedName === 'write' || mappedName === 'edit') {
-    if (!mappedArgs.filePath) {
-      const pathValue = mappedArgs.path || mappedArgs.target_file || mappedArgs.file || mappedArgs.filename
-      if (pathValue) {
-        mappedArgs.filePath = pathValue
-        fileLog(`[TOOL NORMALIZATION] Aggressive ${mappedName} mapping: assigned filePath`)
-      }
-    }
-  }
-
-  // 3. Strict Cleaning (OpenCode tools can be strict about extra keys)
+  // Schema-specific argument normalization
   let cleanedArgs: any = {}
   
-  if (mappedName === 'read') {
-    cleanedArgs.filePath = mappedArgs.filePath || mappedArgs.path || ''
-  } else if (mappedName === 'write') {
-    cleanedArgs.filePath = mappedArgs.filePath || mappedArgs.path || ''
-    cleanedArgs.content = mappedArgs.content || mappedArgs.text || ''
-  } else if (mappedName === 'edit') {
-    cleanedArgs.filePath = mappedArgs.filePath || mappedArgs.path || ''
-    cleanedArgs.text = mappedArgs.text || ''
-    cleanedArgs.explanation = mappedArgs.explanation || ''
-  } else if (mappedName === 'bash') {
-    cleanedArgs.command = mappedArgs.command || ''
-    cleanedArgs.description = mappedArgs.description || 'Executing command'
-    cleanedArgs.run_in_background = !!mappedArgs.run_in_background
-  } else if (mappedName === 'task' || mappedName === 'task_create') {
-    cleanedArgs.description = mappedArgs.description || ''
-    cleanedArgs.run_in_background = !!mappedArgs.run_in_background
-    cleanedArgs.load_skills = Array.isArray(mappedArgs.load_skills) ? mappedArgs.load_skills : []
-  } else {
-    // For unknown tools, just use what we have
-    cleanedArgs = mappedArgs
+  switch (mappedName) {
+    case 'read':
+      // OpenCode read: { path, offset?, limit? }
+      cleanedArgs.path = mappedArgs.path || mappedArgs.filePath || mappedArgs.file || mappedArgs.filename || ''
+      if (mappedArgs.offset !== undefined) cleanedArgs.offset = mappedArgs.offset
+      if (mappedArgs.limit !== undefined) cleanedArgs.limit = mappedArgs.limit
+      break
+      
+    case 'write':
+      // OpenCode write: { filePath, content }
+      cleanedArgs.filePath = mappedArgs.filePath || mappedArgs.path || mappedArgs.file || ''
+      cleanedArgs.content = mappedArgs.content || mappedArgs.text || ''
+      break
+      
+    case 'edit':
+      // OpenCode edit: { filePath, oldString, newString, replaceAll? }
+      cleanedArgs.filePath = mappedArgs.filePath || mappedArgs.path || mappedArgs.file || ''
+      cleanedArgs.oldString = mappedArgs.oldString || mappedArgs.old_text || mappedArgs.search || mappedArgs.text || ''
+      cleanedArgs.newString = mappedArgs.newString || mappedArgs.new_text || mappedArgs.replace || ''
+      if (mappedArgs.replaceAll !== undefined) cleanedArgs.replaceAll = !!mappedArgs.replaceAll
+      break
+      
+    case 'list':
+      // OpenCode list: { path }
+      cleanedArgs.path = mappedArgs.path || mappedArgs.filePath || mappedArgs.directory || '.'
+      break
+      
+    case 'glob':
+      // OpenCode glob: { pattern, path? }
+      cleanedArgs.pattern = mappedArgs.pattern || mappedArgs.glob || '*'
+      if (mappedArgs.path) cleanedArgs.path = mappedArgs.path
+      break
+      
+    case 'grep':
+      // OpenCode grep: { pattern, path?, include?, context_lines? }
+      cleanedArgs.pattern = mappedArgs.pattern || mappedArgs.query || mappedArgs.search || ''
+      if (mappedArgs.path) cleanedArgs.path = mappedArgs.path
+      if (mappedArgs.include) cleanedArgs.include = mappedArgs.include
+      if (mappedArgs.context_lines !== undefined) cleanedArgs.context_lines = mappedArgs.context_lines
+      break
+      
+    case 'bash':
+      // OpenCode bash: { command, timeout? }
+      cleanedArgs.command = mappedArgs.command || mappedArgs.script || ''
+      if (mappedArgs.timeout !== undefined) cleanedArgs.timeout = mappedArgs.timeout
+      break
+      
+    default:
+      // Unknown tool - pass through
+      cleanedArgs = mappedArgs
   }
 
   const finalArgs = JSON.stringify(cleanedArgs)
   if (originalArgs !== finalArgs) {
-    fileLog(`[TOOL NORMALIZATION] Arguments corrected: BEFORE=${originalArgs} AFTER=${finalArgs}`)
+    fileLog(`[TOOL NORMALIZATION] Args corrected: ${originalArgs} -> ${finalArgs}`)
   }
 
   return { name: mappedName, args: cleanedArgs }
 }
 
-// Store active ACP clients by model
-const acpClients = new Map<string, IFlowClient>()
+// ============================================================================
+// ACP TOOL CALL EXTRACTION
+// ============================================================================
 
-function buildToolsSystemPrompt(tools: any[]): string {
-  if (!tools || tools.length === 0) return ''
-  
-  const toolDefs = tools.map((t: any) => {
-    const fn = t.function || t
-    const params = fn.parameters?.properties || {}
-    const required = fn.parameters?.required || []
-    
-    const paramsList = Object.entries(params).map(([name, schema]: [string, any]) => {
-      const req = required.includes(name) ? ' (required)' : ' (optional)'
-      return `  - "${name}": ${schema.type || 'string'}${req} — ${schema.description || ''}`
-    }).join('\n')
-    
-    return `### ${fn.name}\n${fn.description || ''}\nParameters JSON Map:\n${paramsList || '  (none)'}`
-  }).join('\n\n')
+function extractNativeACPToolCall(msg: any): { name: string; args: any } | null {
+  if (!msg) return null
 
-  return `\n\n## IMPORTANT: External Tool Usage
-You have access to external tools executed by OpenCode (the editor). DO NOT USE ANY INTERNAL TOOLS like read_text_file or execute_command.
-Available Tools:
-${toolDefs}
+  // Try different message structures
+  if (msg.type === 'tool_call' && msg.payload?.toolName) {
+    return {
+      name: msg.payload.toolName,
+      args: msg.payload.arguments || {},
+    }
+  }
 
-To execute an external tool, you MUST use the native tool calling capability or output exact text in the following format and then STOP immediately:
-<<USA_TOOL>>{"name": "TOOL_NAME", "arguments": {"param1": "value1"}}<</USA_TOOL>>
+  if (msg.messageType === 'TOOL_CALL' && msg.toolCall) {
+    return {
+      name: msg.toolCall.name,
+      args: msg.toolCall.arguments || {},
+    }
+  }
 
-Example:
-<<USA_TOOL>>{"name": "read", "arguments": {"path": "src/index.ts"}}<</USA_TOOL>>
-`
+  // Direct toolName field (from iFlow SDK)
+  if (msg.toolName) {
+    return {
+      name: msg.toolName,
+      args: msg.args || msg.arguments || {},
+    }
+  }
+
+  return null
 }
 
-/**
- * Get or create an ACP client for a specific model
- */
-async function getACPClient(model: string, tools: any[], isNewChat: boolean): Promise<IFlowClient> {
-  let client = acpClients.get(model)
+function extractToolCallFromText(text: string): { name: string; args: any } | null {
+  if (!text || !text.includes('<<USA_TOOL>>')) return null
+
+  const match = text.match(/<<USA_TOOL>>\s*([\w.-]+)\s*(\{[\s\S]*?\})?\s*(?:<<\/USA_TOOL>>|$)/)
+  if (!match) return null
+
+  const toolName = match[1]
+  const rawArgs = match[2]
   
-  // Restart if requested (e.g., new chat session in OpenCode)
-  if (isNewChat && client) {
-    fileLog(`Restarting ACP client for model ${model} due to new chat session`)
-    try { await client.disconnect() } catch {}
-    client = undefined
+  if (!toolName) return null
+
+  try {
+    return {
+      name: toolName,
+      args: rawArgs ? JSON.parse(rawArgs) : {},
+    }
+  } catch {
+    fileLog(`[TOOL TEXT PARSE ERROR] Failed to parse: ${rawArgs}`)
+    return null
+  }
+}
+
+function extractReasoning(msg: any): string {
+  if (msg?.chunk?.thought) return msg.chunk.thought
+  if (msg?.reasoning) return msg.reasoning
+  return ''
+}
+
+function extractACPText(msg: any): string {
+  if (msg?.chunk?.text) return msg.chunk.text
+  if (msg?.content) return msg.content
+  if (typeof msg === 'string') return msg
+  return ''
+}
+
+function isACPDoneMessage(msg: any): boolean {
+  return msg?.type === MessageType.TASK_FINISH || 
+         msg?.messageType === 'TASK_FINISH' ||
+         msg?.stopReason !== undefined
+}
+
+// ============================================================================
+// SESSION MANAGEMENT
+// ============================================================================
+
+async function getOrCreateSession({
+  sessionKey,
+  model,
+  tools,
+  conversation,
+}: {
+  sessionKey: string
+  model: string
+  tools: any[]
+  conversation: ConversationContext
+}): Promise<SessionState> {
+  const existing = acpSessions.get(sessionKey)
+  if (existing && existing.client?.isConnected?.()) {
+    existing.lastActivityAt = Date.now()
+    fileLog(`[SESSION] Reusing session: ${sessionKey.substring(0, 8)}... model=${model}`)
+    return existing
   }
 
-  if (client && client.isConnected()) {
-    return client
-  }
+  fileLog(`[SESSION] Creating new session: ${sessionKey.substring(0, 8)}... model=${model}`)
   
-  fileLog(`Creating new ACP client for model: ${model}`)
+  const compatPrompt = buildOpenCodeCompatPrompt(tools)
   
-  const appendPrompt = buildToolsSystemPrompt(tools)
-
-  client = new IFlowClient({
+  const client = new IFlowClient({
     permissionMode: PermissionMode.MANUAL,
     autoStartProcess: true,
     logLevel: 'ERROR',
     sessionSettings: {
       disallowed_tools: IFLOW_INTERNAL_TOOLS,
-      ...(appendPrompt ? { append_system_prompt: appendPrompt } : {})
+      append_system_prompt: compatPrompt,
     }
   })
   
@@ -230,17 +498,187 @@ async function getACPClient(model: string, tools: any[], isNewChat: boolean): Pr
   
   try {
     await client.config.set('model', model)
-  } catch (err) {}
+  } catch (err) {
+    fileLog(`[SESSION] Warning: Could not set model: ${err}`)
+  }
+
+  const session: SessionState = {
+    sessionKey,
+    model,
+    client,
+    createdAt: Date.now(),
+    lastActivityAt: Date.now(),
+    initialized: false,
+    toolSchemaHash: hashToolSchema(tools),
+  }
+
+  acpSessions.set(sessionKey, session)
+  fileLog(`[SESSION] Session created and stored: ${sessionKey.substring(0, 8)}...`)
   
-  acpClients.set(model, client)
-  return client
+  return session
 }
+
+async function initializeSessionIfNeeded({
+  session,
+  conversation,
+}: {
+  session: SessionState
+  conversation: ConversationContext
+}): Promise<void> {
+  if (session.initialized) return
+
+  // Inject system context on first turn
+  const systemBlock = conversation.systemMessages.join('\n\n')
+  
+  if (systemBlock.trim()) {
+    fileLog(`[SESSION INIT] Injecting system context (${systemBlock.length} chars)`)
+    // System messages are already included via append_system_prompt in session settings
+  }
+
+  session.initialized = true
+  fileLog(`[SESSION INIT] Session initialized: ${session.sessionKey.substring(0, 8)}...`)
+}
+
+// ============================================================================
+// STREAM EMITTERS
+// ============================================================================
+
+function emitReasoningChunk(res: ServerResponse, chatId: string, created: number, model: string, reasoning: string) {
+  if (!reasoning) return
+  const chunk: StreamChunk = {
+    id: chatId,
+    object: 'chat.completion.chunk',
+    created,
+    model,
+    choices: [{
+      index: 0,
+      delta: { role: 'assistant', reasoning_content: reasoning, thought: reasoning } as any,
+      finish_reason: null
+    }]
+  }
+  res.write(`data: ${JSON.stringify(chunk)}\n\n`)
+}
+
+function emitContentChunk(res: ServerResponse, chatId: string, created: number, model: string, content: string) {
+  if (!content) return
+  const chunk: StreamChunk = {
+    id: chatId,
+    object: 'chat.completion.chunk',
+    created,
+    model,
+    choices: [{
+      index: 0,
+      delta: { content },
+      finish_reason: null
+    }]
+  }
+  res.write(`data: ${JSON.stringify(chunk)}\n\n`)
+}
+
+function emitToolCallChunk(res: ServerResponse, chatId: string, created: number, model: string, toolCall: NormalizedToolCall) {
+  const openAIToolCall = {
+    index: 0,
+    id: `call_${randomUUID()}`,
+    type: 'function' as const,
+    function: {
+      name: toolCall.name,
+      arguments: JSON.stringify(toolCall.args)
+    }
+  }
+  
+  const chunk: StreamChunk = {
+    id: chatId,
+    object: 'chat.completion.chunk',
+    created,
+    model,
+    choices: [{
+      index: 0,
+      delta: { role: 'assistant', tool_calls: [openAIToolCall] } as any,
+      finish_reason: 'tool_calls'
+    }]
+  }
+  res.write(`data: ${JSON.stringify(chunk)}\n\n`)
+  res.write('data: [DONE]\n\n')
+  res.end()
+}
+
+function emitFinalDoneChunk(res: ServerResponse, chatId: string, created: number, model: string, reason: string = 'stop') {
+  const chunk: StreamChunk = {
+    id: chatId,
+    object: 'chat.completion.chunk',
+    created,
+    model,
+    choices: [{
+      index: 0,
+      delta: {},
+      finish_reason: reason === 'max_tokens' ? 'length' : 'stop'
+    }]
+  }
+  res.write(`data: ${JSON.stringify(chunk)}\n\n`)
+  res.write('data: [DONE]\n\n')
+  res.end()
+}
+
+// ============================================================================
+// ACP MESSAGE PROCESSING
+// ============================================================================
+
+function processACPMessage(msg: any): ACPProcessingResult {
+  if (!msg) return { type: 'noop' }
+
+  // Priority 1: Native tool call from ACP
+  const nativeToolCall = extractNativeACPToolCall(msg)
+  if (nativeToolCall) {
+    return {
+      type: 'tool_call',
+      toolCall: normalizeToolCall(nativeToolCall.name, nativeToolCall.args),
+      reasoning: extractReasoning(msg),
+    }
+  }
+
+  const text = extractACPText(msg)
+  if (text) {
+    // Priority 2: Fallback textual tool call
+    const fallbackToolCall = extractToolCallFromText(text)
+    if (fallbackToolCall) {
+      return {
+        type: 'tool_call',
+        toolCall: normalizeToolCall(fallbackToolCall.name, fallbackToolCall.args),
+        reasoning: extractReasoning(msg),
+      }
+    }
+
+    // Priority 3: Normal content
+    return {
+      type: 'content',
+      content: text,
+      reasoning: extractReasoning(msg),
+    }
+  }
+
+  // Check for done
+  if (isACPDoneMessage(msg)) {
+    return {
+      type: 'done',
+      reasoning: extractReasoning(msg),
+    }
+  }
+
+  return { type: 'noop', reasoning: extractReasoning(msg) }
+}
+
+// ============================================================================
+// MAIN HANDLER
+// ============================================================================
 
 export async function handleACPStreamRequest(
   request: ChatCompletionRequest,
   res: ServerResponse,
   enableLog: boolean
 ): Promise<void> {
+  // Cleanup expired sessions first
+  cleanupExpiredSessions()
+
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
     'Cache-Control': 'no-cache',
@@ -249,266 +687,162 @@ export async function handleACPStreamRequest(
 
   const chatId = `iflow-${randomUUID()}`
   const created = Math.floor(Date.now() / 1000)
-  
+  const model = request.model
   const tools = request.tools || []
-  
-  // Determine if this is a new chat (only system and max 1 user msg)
-  const isNewChat = request.messages.length <= 2 
-  const client = await getACPClient(request.model, tools, isNewChat)
-  
-  // Figure out what text to send to the iFlow CLI stateful session
-  const lastMessage = request.messages.length > 0 ? request.messages[request.messages.length - 1] : null
-  const prevMessage = request.messages.length > 1 ? request.messages[request.messages.length - 2] : null
 
-  let sendText = ''
-  
-  if (lastMessage && lastMessage.role === 'tool') {
-    // This is a tool execution result from OpenCode!
-    const toolCallName = (lastMessage as any).name || 'tool'
-    sendText = `[Tool Execution Result for ${toolCallName}]\n${lastMessage.content}`
-  } else if (lastMessage && lastMessage.role === 'user') {
-    sendText = typeof lastMessage.content === 'string' ? lastMessage.content : ''
-    
-    // Safety check: if there is a tool result but user appended a new message right after
-    if (prevMessage && prevMessage.role === 'tool') {
-      const toolCallName = (prevMessage as any).name || 'tool'
-      sendText = `[Tool Execution Result for ${toolCallName}]\n${prevMessage.content}\n\nUser: ${sendText}`
-    }
+  // Build session key from conversation context
+  const sessionKey = makeSessionKey(request)
+  const conversation = buildConversationContext(request)
+
+  fileLog(`[REQ] sessionKey=${sessionKey.substring(0, 8)}... model=${model} msgCount=${request.messages.length}`)
+
+  // Get or create session
+  let session: SessionState
+  try {
+    session = await getOrCreateSession({
+      sessionKey,
+      model,
+      tools,
+      conversation,
+    })
+  } catch (error: any) {
+    fileLog(`[ERROR] Failed to create session: ${error.message}`)
+    emitFinalDoneChunk(res, chatId, created, model)
+    return
   }
 
-  if (!sendText) sendText = "Continue."
+  // Update session activity
+  session.lastActivityAt = Date.now()
+
+  // Initialize session if needed
+  await initializeSessionIfNeeded({ session, conversation })
+
+  // Build turn prompt
+  const turnPrompt = buildTurnPrompt({ conversation, requestBody: request })
+  
+  fileLog(`[TURN] Sending: ${turnPrompt.substring(0, 150)}...`)
+  if (enableLog) logger.log(`[IFlowACP] Sending: ${turnPrompt.substring(0, 100)}...`)
+
+  // State for streaming
+  const state = {
+    reasoningBuffer: '',
+    contentBuffer: '',
+    emittedToolCall: false,
+    finished: false,
+  }
 
   try {
-    fileLog(`[REQ] model=${request.model} msgLen=${request.messages.length} sendText=${sendText.substring(0, 100)}`)
-    if (enableLog) logger.log(`[IFlowACP] Sending text to CLI: ${sendText.substring(0, 100)}...`)
-    await client.sendMessage(sendText)
+    await session.client.sendMessage(turnPrompt)
 
-    // Buffers for parsing
-    let contentBuffer = ''
-    let isExtractingTool = false
-    let toolString = ''
+    for await (const message of session.client.receiveMessages()) {
+      if (state.finished) break
 
-    for await (const message of client.receiveMessages()) {
-      switch (message.type) {
-        case MessageType.ASSISTANT:
-          const assistantMsg = message as any
-          if (assistantMsg.chunk?.thought) {
-            // Reasoning content in stream - Send BOTH reasoning_content (OpenAI standard) and thought (Antigravity standard)
-            // Also include role: assistant in the first chunk if needed
-            const chunk: StreamChunk = {
-              id: chatId, object: 'chat.completion.chunk', created, model: request.model,
-              choices: [{ index: 0, delta: { role: 'assistant', reasoning_content: assistantMsg.chunk.thought, thought: assistantMsg.chunk.thought } as any, finish_reason: null }]
-            }
-            res.write(`data: ${JSON.stringify(chunk)}\n\n`)
-          } else if (assistantMsg.chunk?.text) {
-            const text = assistantMsg.chunk.text
-            contentBuffer += text
-            
-            // Text Parsing Engine for tools
-            if (!isExtractingTool) {
-              const startIdx = contentBuffer.indexOf('<<USA_TOOL>>')
-              if (startIdx !== -1) {
-                // Found start of tool call - flush EVERYTHING before the tag
-                const normalText = contentBuffer.substring(0, startIdx)
-                if (normalText) {
-                  const chunk: StreamChunk = {
-                    id: chatId, object: 'chat.completion.chunk', created, model: request.model,
-                    choices: [{ index: 0, delta: { content: normalText }, finish_reason: null }]
-                  }
-                  res.write(`data: ${JSON.stringify(chunk)}\n\n`)
-                }
-                
-                isExtractingTool = true
-                // Start filling toolString with the rest of the buffer after the tag
-                toolString = contentBuffer.substring(startIdx + 12)
-                contentBuffer = ''
-              } else {
-                // We haven't seen the full tag yet, but we might have a partial one at the end
-                // Find potential start of tag '<'
-                const lastLt = contentBuffer.lastIndexOf('<')
-                
-                if (lastLt === -1) {
-                  // No tag start suspected, flush everything
-                  const chunk: StreamChunk = {
-                    id: chatId, object: 'chat.completion.chunk', created, model: request.model,
-                    choices: [{ index: 0, delta: { content: contentBuffer }, finish_reason: null }]
-                  }
-                  res.write(`data: ${JSON.stringify(chunk)}\n\n`)
-                  contentBuffer = ''
-                } else if (contentBuffer.length - lastLt > 12) {
-                  // Buffer has something starting with '<' but it's longer than the actual tag length 
-                  // and didn't match '<<USA_TOOL>>' (checked above), so it's probably just normal text
-                  const chunk: StreamChunk = {
-                    id: chatId, object: 'chat.completion.chunk', created, model: request.model,
-                    choices: [{ index: 0, delta: { content: contentBuffer }, finish_reason: null }]
-                  }
-                  res.write(`data: ${JSON.stringify(chunk)}\n\n`)
-                  contentBuffer = ''
-                } else {
-                  // Suspect a tag might be starting at the end - flush everything BEFORE the '<'
-                  const flushText = contentBuffer.substring(0, lastLt)
-                  if (flushText) {
-                    const chunk: StreamChunk = {
-                      id: chatId, object: 'chat.completion.chunk', created, model: request.model,
-                      choices: [{ index: 0, delta: { content: flushText }, finish_reason: null }]
-                    }
-                    res.write(`data: ${JSON.stringify(chunk)}\n\n`)
-                  }
-                  contentBuffer = contentBuffer.substring(lastLt)
-                }
-              }
-            } else {
-              // We ARE extracting a tool call
-              toolString += text
-              contentBuffer = '' // Clear it just in case
-            }
+      const result = processACPMessage(message)
 
-            // Check if tool call has finished
-            if (isExtractingTool && toolString.includes('<</USA_TOOL>>')) {
-              const toolContent = (toolString.split('<</USA_TOOL>>')[0] || '').trim()
-              fileLog(`[TOOL PARSED] Payload: ${toolContent}`)
-              if (enableLog) logger.log(`[IFlowACP] Extracted Tool JSON: ${toolContent}`)
-              
-              // Parse JSON and emit tool_calls to OpenCode and FORCE CLOSE stream
-              try {
-                const toolJson = JSON.parse(toolContent)
-                const normalized = normalizeToolCall(toolJson.name, toolJson.arguments || {})
-                
-                const openAIToolCall = {
-                  index: 0,
-                  id: `call_${randomUUID()}`,
-                  type: 'function' as const,
-                  function: {
-                    name: normalized.name,
-                    arguments: JSON.stringify(normalized.args)
-                  }
-                }
-                
-                const chunk: StreamChunk = {
-                  id: chatId, object: 'chat.completion.chunk', created, model: request.model,
-                  choices: [{ index: 0, delta: { role: 'assistant', tool_calls: [openAIToolCall] } as any, finish_reason: 'tool_calls' }]
-                }
-                res.write(`data: ${JSON.stringify(chunk)}\n\n`)
-                res.write('data: [DONE]\n\n')
-                res.end()
-                fileLog(`[TOOL EXECUTED] Mapped ${toolJson.name} -> ${normalized.name}. Sent tool_calls delta to OpenCode and forcefully closed stream.`)
-                return // We forcefully exit the stream block
-              } catch (e) {
-                fileLog(`[TOOL ERROR] Failed to parse JSON: ${toolContent}`)
-              }
-            }
+      // Emit reasoning if present
+      if (result.reasoning) {
+        state.reasoningBuffer += result.reasoning
+        emitReasoningChunk(res, chatId, created, model, result.reasoning)
+      }
+
+      switch (result.type) {
+        case 'tool_call':
+          fileLog(`[TOOL CALL] ${result.toolCall.name} -> ${JSON.stringify(result.toolCall.args)}`)
+          emitToolCallChunk(res, chatId, created, model, result.toolCall)
+          state.emittedToolCall = true
+          state.finished = true
+          return // Stop processing - OpenCode will execute the tool
+
+        case 'content':
+          state.contentBuffer += result.content
+          // Check for inline tool call markers in content
+          if (result.content.includes('<<USA_TOOL>>')) {
+            // Don't emit content that contains tool markers - will be extracted
+          } else {
+            emitContentChunk(res, chatId, created, model, result.content)
           }
           break
 
-        case MessageType.TOOL_CALL:
-          const toolCallMsg = message as any
-          fileLog(`[NATIVE TOOL CALL] Intercepted: ${JSON.stringify(toolCallMsg)}`)
-          
-          // We want to catch the tool call as early as possible (status: pending)
-          // to prevent internal execution and forward to OpenCode.
-          if (toolCallMsg.toolName) {
-            const normalized = normalizeToolCall(toolCallMsg.toolName, toolCallMsg.args || {})
-            
-            const openAIToolCall = {
-              index: 0,
-              id: `call_${randomUUID()}`,
-              type: 'function' as const,
-              function: {
-                name: normalized.name,
-                arguments: JSON.stringify(normalized.args)
+        case 'done':
+          state.finished = true
+          break
+
+        case 'noop':
+          // Handle other message types
+          if (message.type === MessageType.ASK_USER_QUESTIONS) {
+            const askMsg = message as any
+            if (askMsg.questions && askMsg.questions.length > 0) {
+              const answers: Record<string, string> = {}
+              for (const q of askMsg.questions) {
+                if (q.options && q.options.length > 0) {
+                  answers[q.header] = q.options[0].label
+                }
               }
+              session.client.respondToAskUserQuestions(answers).catch(() => {})
             }
+          } else if (message.type === MessageType.EXIT_PLAN_MODE) {
+            session.client.respondToExitPlanMode(true).catch(() => {})
+          } else if (message.type === MessageType.PERMISSION_REQUEST) {
+            // Block internal tool execution - delegate to OpenCode
+            const permMsg = message as any
+            fileLog(`[PERMISSION] Blocking: ${JSON.stringify(permMsg)}`)
             
-            const chunk: StreamChunk = {
-              id: chatId, object: 'chat.completion.chunk', created, model: request.model,
-              choices: [{ index: 0, delta: { role: 'assistant', tool_calls: [openAIToolCall] } as any, finish_reason: 'tool_calls' }]
-            }
-            res.write(`data: ${JSON.stringify(chunk)}\n\n`)
-            res.write('data: [DONE]\n\n')
-            res.end()
-            fileLog(`[TOOL INTERCEPTED] Forwarded ${toolCallMsg.toolName} -> ${normalized.name} to OpenCode. Arguments: ${JSON.stringify(normalized.args)}. Ending stream.`)
-            return // Stop processing current iFlow stream
-          }
-          break
-
-        case MessageType.TASK_FINISH:
-          // If we reach natural finish without tools
-          const finishMsg = message as any
-          const finishChunk: StreamChunk = {
-            id: chatId, object: 'chat.completion.chunk', created, model: request.model,
-            choices: [{ index: 0, delta: {}, finish_reason: finishMsg.stopReason === 'max_tokens' ? 'length' : 'stop' }]
-          }
-          res.write(`data: ${JSON.stringify(finishChunk)}\n\n`)
-          res.write('data: [DONE]\n\n')
-          res.end()
-          fileLog(`[STREAM END] Natural finish: ${finishMsg.stopReason}`)
-          return
-
-        case MessageType.ERROR:
-          const errorMsg = message as any
-          fileLog(`[ERROR] ACP Message Error: ${errorMsg.message}`)
-          break
-          
-        case MessageType.ASK_USER_QUESTIONS:
-          const askMsg = message as any
-          if (askMsg.questions && askMsg.questions.length > 0) {
-            const answers: Record<string, string> = {}
-            for (const q of askMsg.questions) {
-              if (q.options && q.options.length > 0) answers[q.header] = q.options[0].label
-            }
-            client.respondToAskUserQuestions(answers).catch(() => {})
-          }
-          continue
-
-        case MessageType.EXIT_PLAN_MODE:
-          client.respondToExitPlanMode(true).catch(() => {})
-          continue
-
-        case MessageType.PERMISSION_REQUEST:
-          const permMsg = message as any
-          fileLog(`[PERMISSION REQUEST] ${JSON.stringify(permMsg)}`)
-          
-          // DO NOT auto-approve tool execution permissions. 
-          // We want to intercept the TOOL_CALL and let OpenCode handle it.
-          // If we approve here, iFlow's CLI might execute it before we catch the TOOL_CALL text/event.
-          if (permMsg.options && permMsg.options.length > 0) {
-            // Only auto-approve if NOT a tool execution. 
-            // Most permission requests in iFlow CLI are for tools.
-            const isToolPermission = true // Assume tool related in this context
-            
-            if (isToolPermission) {
-              fileLog(`[PERMISSION DENIED] Blocked internal tool execution to delegate to OpenCode.`)
-              // We don't respond, or we respond with a denial if possible.
-              // For now, doing nothing might be safer or we can find the "deny" optionId.
-              const denyOption = permMsg.options.find((o: any) => o.type === 'deny' || o.label?.toLowerCase().includes('deny'))
+            if (permMsg.options && permMsg.options.length > 0) {
+              const denyOption = permMsg.options.find(
+                (o: any) => o.type === 'deny' || o.label?.toLowerCase().includes('deny')
+              )
               if (denyOption) {
-                client.respondToToolConfirmation(permMsg.requestId, denyOption.optionId).catch(() => {})
+                session.client.respondToToolConfirmation(permMsg.requestId, denyOption.optionId).catch(() => {})
               }
-            } else {
-              client.respondToToolConfirmation(permMsg.requestId, permMsg.options[0].optionId).catch(() => {})
             }
+          } else if (message.type === MessageType.ERROR) {
+            const errorMsg = message as any
+            fileLog(`[ERROR] ACP Error: ${errorMsg.message}`)
           }
-          continue
+          break
       }
     }
 
-  } catch (error: any) {
-    fileLog(`[EXCEPTION] Proxy Error: ${error.message}`)
-    const errorChunk: StreamChunk = {
-      id: chatId, object: 'chat.completion.chunk', created, model: request.model,
-      choices: [{ index: 0, delta: { content: `Error: ${error.message}` }, finish_reason: 'stop' }]
+    // Natural finish
+    if (!state.emittedToolCall) {
+      fileLog(`[STREAM END] Natural finish, content length: ${state.contentBuffer.length}`)
+      emitFinalDoneChunk(res, chatId, created, model)
     }
-    res.write(`data: ${JSON.stringify(errorChunk)}\n\n`)
-    res.write('data: [DONE]\n\n')
-    res.end()
+
+  } catch (error: any) {
+    fileLog(`[EXCEPTION] ${error.message}`)
+    
+    if (!state.emittedToolCall) {
+      const errorChunk: StreamChunk = {
+        id: chatId,
+        object: 'chat.completion.chunk',
+        created,
+        model,
+        choices: [{
+          index: 0,
+          delta: { content: `Error: ${error.message}` },
+          finish_reason: 'stop'
+        }]
+      }
+      res.write(`data: ${JSON.stringify(errorChunk)}\n\n`)
+      res.write('data: [DONE]\n\n')
+      res.end()
+    }
   }
 }
 
+// ============================================================================
+// CLEANUP
+// ============================================================================
+
 export async function cleanupACPClients(): Promise<void> {
-  for (const [model, client] of acpClients) {
-    try { await client.disconnect() } catch (err) {}
+  fileLog(`[CLEANUP] Cleaning up ${acpSessions.size} sessions`)
+  for (const [key, session] of acpSessions) {
+    try {
+      await session.client.disconnect()
+    } catch (err) {}
   }
-  acpClients.clear()
+  acpSessions.clear()
 }
 
 process.on('SIGINT', cleanupACPClients)

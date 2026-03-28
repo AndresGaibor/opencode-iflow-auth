@@ -9,6 +9,8 @@
     "build": "tsc -p tsconfig.build.json",
     "format": "prettier --write --no-config --no-semi --single-quote --trailing-comma none --print-width 100 'src/**/*.ts'",
     "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "prepublishOnly": "npm run build"
   },
   "keywords": [
@@ -46,7 +48,8 @@
     "@types/proper-lockfile": "^4.1.4",
     "prettier": "^3.4.2",
     "prettier-plugin-organize-imports": "^4.1.0",
-    "typescript": "^5.7.3"
+    "typescript": "^5.7.3",
+    "vitest": "^3.0.0"
   },
   "opencode": {
     "type": "plugin",
