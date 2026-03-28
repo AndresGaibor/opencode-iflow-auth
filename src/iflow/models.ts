@@ -1,7 +1,12 @@
-import { IFLOW_CONSTANTS } from '../constants.js'
+import { API_BASE_URL, USER_AGENT } from '../constants/api.js'
+import { CLI_EXCLUSIVE_MODELS, CLI_REQUIRED_PATTERNS } from '../constants/models.js'
+import { THINKING_MODEL_PATTERNS, isThinkingModel as checkIsThinkingModel } from '../constants/thinking.js'
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { homedir } from 'node:os'
+
+// Re-export for backward compatibility
+export { CLI_EXCLUSIVE_MODELS, CLI_REQUIRED_PATTERNS, THINKING_MODEL_PATTERNS }
 
 // iFlow 模型信息接口
 export interface IFlowModelInfo {
@@ -21,25 +26,6 @@ export interface ModelCache {
   models: IFlowModelInfo[]
   cliModels: string[]
 }
-
-// CLI 独占模型列表（这些模型只能通过 CLI 访问）
-export const CLI_EXCLUSIVE_MODELS = ['glm-5', 'glm-5-free', 'glm-5-thinking']
-
-// 需要特殊处理的模型模式
-export const CLI_REQUIRED_PATTERNS = [/^glm-5/]
-
-// Thinking 模型模式
-export const THINKING_MODEL_PATTERNS = [
-  /^glm-5/,
-  /^glm-4\.7/,
-  /^glm-4\.6/,
-  /^glm-4/,
-  /deepseek/,
-  /thinking/,
-  /reasoning/,
-  /^kimi-k2\.5/,
-  /^o1-/
-]
 
 // 获取缓存目录
 function getCacheDir(): string {
@@ -61,7 +47,7 @@ const DEFAULT_MODELS_CACHE: ModelCache = {
   version: 1,
   lastUpdated: 0,
   models: [],
-  cliModels: CLI_EXCLUSIVE_MODELS
+  cliModels: [...CLI_EXCLUSIVE_MODELS] as string[]
 }
 
 // 从文件加载缓存
@@ -99,15 +85,15 @@ export function requiresCLI(modelId: string): boolean {
 
 // 判断是否是 Thinking 模型
 export function isThinkingModel(modelId: string): boolean {
-  return THINKING_MODEL_PATTERNS.some(pattern => pattern.test(modelId))
+  return checkIsThinkingModel(modelId)
 }
 
 // 从 iFlow API 获取模型列表
 export async function fetchModelsFromAPI(apiKey: string): Promise<IFlowModelInfo[]> {
-  const response = await fetch(`${IFLOW_CONSTANTS.BASE_URL}/models`, {
+  const response = await fetch(`${API_BASE_URL}/models`, {
     headers: {
       Authorization: `Bearer ${apiKey}`,
-      'User-Agent': IFLOW_CONSTANTS.USER_AGENT
+      'User-Agent': USER_AGENT
     }
   })
 
@@ -148,7 +134,7 @@ export async function getModels(apiKey: string, forceRefresh = false): Promise<M
       version: 1,
       lastUpdated: now,
       models,
-      cliModels: CLI_EXCLUSIVE_MODELS
+      cliModels: [...CLI_EXCLUSIVE_MODELS] as string[]
     }
     
     saveCacheToFile(newCache)

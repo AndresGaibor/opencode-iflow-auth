@@ -1,10 +1,17 @@
 import { homedir } from 'os'
 import { join } from 'path'
+import {
+  PROXY_PORT,
+  PROXY_HOST,
+  DEFAULT_AUTO_INSTALL_CLI,
+  DEFAULT_AUTO_LOGIN
+} from '../../constants/proxy.js'
 import * as logger from '../../plugin/logger.js'
 import type { ChatMessage } from './types.js'
 
-export const IFLOW_PROXY_PORT = 19998
-export const IFLOW_PROXY_HOST = '127.0.0.1'
+// Re-export for backward compatibility
+export const IFLOW_PROXY_PORT = PROXY_PORT
+export const IFLOW_PROXY_HOST = PROXY_HOST
 export const IFLOW_API_BASE = 'https://apis.iflow.cn'
 
 export const DEBUG = process.env.IFLOW_PROXY_DEBUG === 'true'

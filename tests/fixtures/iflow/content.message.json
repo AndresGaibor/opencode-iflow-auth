@@ -1,0 +1,7 @@
+{
+  "description": "Content message",
+  "type": "content",
+  "chunk": {
+    "text": "This is a Node.js project that provides authentication for iFlow CLI."
+  }
+}

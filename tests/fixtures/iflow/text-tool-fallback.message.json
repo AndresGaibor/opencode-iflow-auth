@@ -1,0 +1,7 @@
+{
+  "description": "Text-based tool call fallback (<<USA_TOOL>> format)",
+  "type": "content",
+  "chunk": {
+    "text": "<<USA_TOOL>>read{\"path\": \"README.md\"}<</USA_TOOL>>"
+  }
+}

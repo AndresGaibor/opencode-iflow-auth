@@ -1,0 +1,14 @@
+{
+  "description": "Expected sequence for edit operation",
+  "scenario": "User asks to change foo to bar in a file",
+  "expectedSequence": [
+    { "type": "reasoning" },
+    { "type": "tool_call", "name": "edit" },
+    { "type": "content" }
+  ],
+  "notes": [
+    "Should use 'edit' tool with correct schema",
+    "Should have filePath, oldString, newString",
+    "Should NOT use 'write' for whole file"
+  ]
+}

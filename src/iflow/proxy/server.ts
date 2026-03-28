@@ -1,16 +1,10 @@
 import { createServer, Server, IncomingMessage, ServerResponse } from 'http'
-import { randomUUID } from 'crypto'
 import { log, IFLOW_PROXY_PORT, IFLOW_PROXY_HOST, AUTO_INSTALL_CLI, AUTO_LOGIN } from './utils.js'
 import { checkIFlowCLI, checkIFlowLogin, installIFlowCLI, triggerIFlowLogin } from './cli-manager.js'
-import { handleDirectAPIRequest } from './handlers/api.js'
-import { callIFlowCLI, callIFlowCLIStream } from './handlers/cli.js'
-import { handleACPStreamRequest, cleanupACPClients } from './handlers/acp.js'
-import { requiresCLI } from '../models.js'
+import { cleanupACPClients } from './handlers/acp.js'
+import { routeChatCompletions } from './router.js'
 import * as logger from '../../plugin/logger.js'
-import type { ChatCompletionRequest, ChatCompletionResponse, StreamChunk } from './types.js'
-
-// Use ACP protocol (WebSocket) for CLI models - enables tool calls
-const USE_ACP_PROTOCOL = process.env.IFLOW_USE_ACP !== 'false'
+import type { ChatCompletionRequest } from './types.js'
 
 export class IFlowCLIProxy {
   private server: Server | null = null
@@ -41,7 +35,7 @@ export class IFlowCLIProxy {
       }
       this.cliAvailable = cliCheck.installed
       this.cliChecked = true
-      
+
       if (cliCheck.installed) {
         const loginCheck = checkIFlowLogin()
         this.cliLoggedIn = loginCheck.loggedIn
@@ -66,9 +60,8 @@ export class IFlowCLIProxy {
   }
 
   async stop(): Promise<void> {
-    // Cleanup ACP clients
     await cleanupACPClients()
-    
+
     if (!this.server) return
     return new Promise((resolve) => {
       this.server!.close(() => {
@@ -92,17 +85,28 @@ export class IFlowCLIProxy {
   }
 
   private async handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const url = req.url || ''
+
+    // Handle GET /v1/models
+    if (url === '/v1/models') {
+      if (req.method === 'GET') {
+        this.handleModels(res)
+      } else {
+        res.writeHead(405, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'Method not allowed. Use GET for /v1/models' }))
+      }
+      return
+    }
+
+    // All other endpoints require POST
     if (req.method !== 'POST') {
       res.writeHead(405, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify({ error: 'Method not allowed' }))
       return
     }
 
-    const url = req.url || ''
     if (url === '/v1/chat/completions') {
       await this.handleChatCompletions(req, res)
-    } else if (url === '/v1/models') {
-      this.handleModels(res)
     } else {
       res.writeHead(404, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify({ error: 'Not found' }))
@@ -113,118 +117,31 @@ export class IFlowCLIProxy {
     const authHeader = req.headers['authorization'] || req.headers['Authorization'] || ''
     const authStr = Array.isArray(authHeader) ? (authHeader[0] || '') : authHeader
     const apiKey = authStr.replace('Bearer ', '')
-    
+
     let body = ''
     req.on('data', chunk => { body += chunk.toString() })
     req.on('end', async () => {
       try {
         const request: ChatCompletionRequest = JSON.parse(body)
-        const isStream = request.stream === true
 
         if (this.enableLog) {
-          logger.log(`[IFlowProxy] [Request] model=${request.model} stream=${isStream}`)
+          logger.log(`[IFlowProxy] [Request] model=${request.model} stream=${request.stream}`)
           logger.logApiRequest(request, logger.getTimestamp())
         }
 
-        if (requiresCLI(request.model)) {
-          if (!this.cliAvailable || !this.cliLoggedIn) {
-            res.writeHead(503, { 'Content-Type': 'application/json' })
-            res.end(JSON.stringify({ error: 'iflow CLI not ready' }))
-            return
-          }
-          
-          if (isStream) await this.handleCLIStreamRequest(request, res)
-          else await this.handleCLINonStreamRequest(request, res)
-        } else {
-          await handleDirectAPIRequest(request, res, isStream, apiKey, this.enableLog)
-        }
+        await routeChatCompletions(
+          request,
+          res,
+          apiKey,
+          this.enableLog,
+          this.cliAvailable,
+          this.cliLoggedIn
+        )
       } catch (error) {
         res.writeHead(400, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify({ error: 'Invalid request body' }))
       }
     })
-  }
-
-  private async handleCLINonStreamRequest(request: ChatCompletionRequest, res: ServerResponse): Promise<void> {
-    try {
-      const result = await callIFlowCLI(request)
-      const response: ChatCompletionResponse = {
-        id: `iflow-${randomUUID()}`,
-        object: 'chat.completion',
-        created: Math.floor(Date.now() / 1000),
-        model: request.model,
-        choices: [{
-          index: 0,
-          message: { role: 'assistant', content: result.content },
-          finish_reason: 'stop'
-        }],
-        usage: {
-          prompt_tokens: result.promptTokens || 0,
-          completion_tokens: result.completionTokens || 1,
-          total_tokens: (result.promptTokens || 1) + (result.completionTokens || 1)
-        }
-      }
-      res.writeHead(200, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify(response))
-    } catch (error: any) {
-      res.writeHead(500, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify({ error: error.message || 'Internal server error' }))
-    }
-  }
-
-  private async handleCLIStreamRequest(request: ChatCompletionRequest, res: ServerResponse): Promise<void> {
-    // Use ACP protocol for tool calls support
-    if (USE_ACP_PROTOCOL) {
-      try {
-        await handleACPStreamRequest(request, res, this.enableLog)
-        return
-      } catch (error: any) {
-        log('ACP handler failed, falling back to stdin:', error.message)
-        // Fall through to stdin-based handler
-      }
-    }
-
-
-    // Fallback: stdin-based streaming (no tool calls)
-    res.writeHead(200, {
-      'Content-Type': 'text/event-stream',
-      'Cache-Control': 'no-cache',
-      'Connection': 'keep-alive'
-    })
-
-    const chatId = `iflow-${randomUUID()}`
-    const created = Math.floor(Date.now() / 1000)
-
-    try {
-      await callIFlowCLIStream(request, (content, done, isReasoning, toolCall) => {
-        const delta: any = {}
-        if (done) {} 
-        else if (toolCall) delta.tool_calls = [toolCall]
-        else if (isReasoning) {
-          delta.reasoning_content = content
-          if (this.enableLog) logger.log(`[IFlowProxy] [CLI Chunk] [Reasoning] ${content}`)
-        } else {
-          delta.content = content
-          if (this.enableLog) logger.log(`[IFlowProxy] [CLI Chunk] [Content] ${content}`)
-        }
-
-        const chunk: StreamChunk = {
-          id: chatId,
-          object: 'chat.completion.chunk',
-          created,
-          model: request.model,
-          choices: [{ index: 0, delta, finish_reason: done ? 'stop' : null }]
-        }
-
-        res.write(`data: ${JSON.stringify(chunk)}\n\n`)
-        if (done) {
-          res.write('data: [DONE]\n\n')
-          res.end()
-        }
-      })
-    } catch (error: any) {
-      res.end()
-    }
   }
 
   private handleModels(res: ServerResponse): void {

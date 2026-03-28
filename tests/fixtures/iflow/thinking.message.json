@@ -1,0 +1,7 @@
+{
+  "description": "Thinking/reasoning message",
+  "type": "thinking",
+  "chunk": {
+    "thought": "I need to explore the repository structure first..."
+  }
+}

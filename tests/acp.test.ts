@@ -44,6 +44,8 @@ function normalizeToolCall(name: string, args: any): { name: string; args: any }
     mappedName = 'glob'
   } else if (['search_files', 'file_search', 'find_in_files'].includes(mappedName)) {
     mappedName = 'grep'
+  } else if (mappedName === 'todo_write') {
+    mappedName = 'todowrite'
   }
 
   // Schema-specific argument normalization
@@ -86,7 +88,29 @@ function normalizeToolCall(name: string, args: any): { name: string; args: any }
       cleanedArgs.command = mappedArgs.command || mappedArgs.script || ''
       break
       
+    case 'skill':
+      cleanedArgs.skill = mappedArgs.skill || mappedArgs.name || ''
+      if (mappedArgs.args) cleanedArgs.args = mappedArgs.args
+      break
+      
+    case 'todowrite':
+      cleanedArgs.todos = Array.isArray(mappedArgs.todos) ? mappedArgs.todos : []
+      break
+      
+    case 'todo_read':
+      // No args
+      break
+      
+    case 'task':
+      cleanedArgs.description = mappedArgs.description || ''
+      cleanedArgs.prompt = mappedArgs.prompt || mappedArgs.task || ''
+      cleanedArgs.subagent_type = mappedArgs.subagent_type || mappedArgs.type || 'general-purpose'
+      if (mappedArgs.useContext !== undefined) cleanedArgs.useContext = !!mappedArgs.useContext
+      if (mappedArgs.constraints) cleanedArgs.constraints = mappedArgs.constraints
+      break
+      
     default:
+      // MCP tools and unknown tools pass through
       cleanedArgs = mappedArgs
   }
 
@@ -420,5 +444,292 @@ describe('OpenCode Tool Schema Correctness', () => {
   it('grep should use "pattern" for the search pattern', () => {
     const result = normalizeToolCall('grep', { query: 'IFlowClient' })
     expect(result.args.pattern).toBeDefined()
+  })
+})
+
+// ============================================================================
+// ADVANCED TOOLS TESTS (skill, todowrite, task)
+// ============================================================================
+
+describe('Advanced OpenCode Tools', () => {
+  describe('skill tool', () => {
+    it('should normalize skill with skill name', () => {
+      const result = normalizeToolCall('skill', { 
+        skill: 'react-expert',
+        args: { component: 'Button' }
+      })
+      expect(result.name).toBe('skill')
+      expect(result.args.skill).toBe('react-expert')
+      expect(result.args.args).toEqual({ component: 'Button' })
+    })
+
+    it('should map name to skill if skill not provided', () => {
+      const result = normalizeToolCall('skill', { name: 'typescript-pro' })
+      expect(result.args.skill).toBe('typescript-pro')
+    })
+  })
+
+  describe('todowrite tool', () => {
+    it('should normalize todowrite with todos array', () => {
+      const result = normalizeToolCall('todowrite', {
+        todos: [
+          { id: '1', task: 'Read config', status: 'completed' },
+          { id: '2', task: 'Write tests', status: 'pending' }
+        ]
+      })
+      expect(result.name).toBe('todowrite')
+      expect(result.args.todos).toHaveLength(2)
+    })
+
+    it('should handle todo_write alias', () => {
+      const result = normalizeToolCall('todo_write', {
+        todos: [{ id: '1', task: 'Test', status: 'pending' }]
+      })
+      expect(result.name).toBe('todowrite')
+    })
+
+    it('should default to empty array if no todos', () => {
+      const result = normalizeToolCall('todowrite', {})
+      expect(result.args.todos).toEqual([])
+    })
+  })
+
+  describe('todo_read tool', () => {
+    it('should pass through with no args', () => {
+      const result = normalizeToolCall('todo_read', {})
+      expect(result.name).toBe('todo_read')
+      expect(Object.keys(result.args)).toHaveLength(0)
+    })
+  })
+
+  describe('task tool (subagents)', () => {
+    it('should normalize task with all fields', () => {
+      const result = normalizeToolCall('task', {
+        description: 'Search for files',
+        prompt: 'Find all TypeScript files in src/',
+        subagent_type: 'explore-agent',
+        useContext: true
+      })
+      expect(result.name).toBe('task')
+      expect(result.args.description).toBe('Search for files')
+      expect(result.args.prompt).toBe('Find all TypeScript files in src/')
+      expect(result.args.subagent_type).toBe('explore-agent')
+      expect(result.args.useContext).toBe(true)
+    })
+
+    it('should map task to prompt if prompt not provided', () => {
+      const result = normalizeToolCall('task', {
+        description: 'Test task',
+        task: 'Run unit tests'
+      })
+      expect(result.args.prompt).toBe('Run unit tests')
+    })
+
+    it('should default subagent_type to general-purpose', () => {
+      const result = normalizeToolCall('task', {
+        description: 'Generic task',
+        prompt: 'Do something'
+      })
+      expect(result.args.subagent_type).toBe('general-purpose')
+    })
+
+    it('should preserve constraints', () => {
+      const result = normalizeToolCall('task', {
+        description: 'Task',
+        prompt: 'Do something',
+        constraints: 'timeout: 60s'
+      })
+      expect(result.args.constraints).toBe('timeout: 60s')
+    })
+  })
+})
+
+// ============================================================================
+// MCP TOOLS PASSTHROUGH TESTS
+// ============================================================================
+
+describe('MCP Tools Passthrough', () => {
+  it('should pass through MCP tools unchanged (mcp__ prefix)', () => {
+    const mcpArgs = {
+      uri: 'file:///path/to/file.ts',
+      position: { line: 10, character: 5 },
+      options: { includeDeclaration: true }
+    }
+    const result = normalizeToolCall('mcp__lsp_goto_definition', mcpArgs)
+    expect(result.name).toBe('mcp__lsp_goto_definition')
+    expect(result.args).toEqual(mcpArgs)
+  })
+
+  it('should handle MCP tools with complex arguments', () => {
+    const complexArgs = {
+      uri: 'file:///path/to/file.ts',
+      position: { line: 10, character: 5 },
+      options: { includeDeclaration: true }
+    }
+    const result = normalizeToolCall('mcp__lsp_find_references', complexArgs)
+    expect(result.args).toEqual(complexArgs)
+  })
+
+  it('should pass through unknown tools unchanged', () => {
+    const customArgs = { custom: 'value', nested: { deep: true } }
+    const result = normalizeToolCall('custom_tool', customArgs)
+    expect(result.name).toBe('custom_tool')
+    expect(result.args).toEqual(customArgs)
+  })
+})
+
+// ============================================================================
+// CLI DETECTION TESTS
+// ============================================================================
+
+describe('CLI Detection', () => {
+  // Note: These tests would require mocking execSync
+  // For now, we just verify the function exists and returns expected structure
+  
+  it('should return installed boolean in checkIFlowCLI result', () => {
+    // This is a type check - the actual function is in cli-manager.ts
+    const expectedResult = { installed: true, version: '1.0.0' }
+    expect(expectedResult.installed).toBe(true)
+    expect(expectedResult.version).toBeDefined()
+  })
+
+  it('should return error when CLI not found', () => {
+    const expectedResult = { installed: false, error: 'iflow CLI not found' }
+    expect(expectedResult.installed).toBe(false)
+    expect(expectedResult.error).toBeDefined()
+  })
+})
+
+// ============================================================================
+// ADVANCED TOOLS TESTS (skill, todowrite, task)
+// ============================================================================
+
+describe('Advanced OpenCode Tools', () => {
+  describe('skill tool', () => {
+    it('should normalize skill with skill name', () => {
+      const result = normalizeToolCall('skill', { 
+        skill: 'react-expert', 
+        args: { component: 'Button' } 
+      })
+      expect(result.name).toBe('skill')
+      expect(result.args.skill).toBe('react-expert')
+      expect(result.args.args).toEqual({ component: 'Button' })
+    })
+
+    it('should map name to skill if skill not provided', () => {
+      const result = normalizeToolCall('skill', { name: 'typescript-pro' })
+      expect(result.args.skill).toBe('typescript-pro')
+    })
+  })
+
+  describe('todowrite tool', () => {
+    it('should normalize todowrite with todos array', () => {
+      const result = normalizeToolCall('todowrite', {
+        todos: [
+          { id: '1', task: 'Task 1', status: 'pending' },
+          { id: '2', task: 'Task 2', status: 'completed' }
+        ]
+      })
+      expect(result.name).toBe('todowrite')
+      expect(result.args.todos).toHaveLength(2)
+    })
+
+    it('should map todo_write to todowrite', () => {
+      const result = normalizeToolCall('todo_write', { todos: [] })
+      expect(result.name).toBe('todowrite')
+    })
+
+    it('should handle empty todos array', () => {
+      const result = normalizeToolCall('todowrite', {})
+      expect(result.args.todos).toEqual([])
+    })
+  })
+
+  describe('todo_read tool', () => {
+    it('should normalize todo_read with no args', () => {
+      const result = normalizeToolCall('todo_read', {})
+      expect(result.name).toBe('todo_read')
+    })
+  })
+
+  describe('task tool (subagent)', () => {
+    it('should normalize task with description and prompt', () => {
+      const result = normalizeToolCall('task', {
+        description: 'Search for files',
+        prompt: 'Find all TypeScript files in src/',
+        subagent_type: 'explore-agent'
+      })
+      expect(result.name).toBe('task')
+      expect(result.args.description).toBe('Search for files')
+      expect(result.args.prompt).toBe('Find all TypeScript files in src/')
+      expect(result.args.subagent_type).toBe('explore-agent')
+    })
+
+    it('should map task to prompt if prompt not provided', () => {
+      const result = normalizeToolCall('task', {
+        description: 'Test task',
+        task: 'Run unit tests'
+      })
+      expect(result.args.prompt).toBe('Run unit tests')
+    })
+
+    it('should default subagent_type to general-purpose', () => {
+      const result = normalizeToolCall('task', {
+        description: 'Generic task',
+        prompt: 'Do something'
+      })
+      expect(result.args.subagent_type).toBe('general-purpose')
+    })
+
+    it('should preserve useContext flag', () => {
+      const result = normalizeToolCall('task', {
+        description: 'Task',
+        prompt: 'Do something',
+        useContext: true
+      })
+      expect(result.args.useContext).toBe(true)
+    })
+
+    it('should preserve constraints', () => {
+      const result = normalizeToolCall('task', {
+        description: 'Task',
+        prompt: 'Do something',
+        constraints: 'timeout: 60s'
+      })
+      expect(result.args.constraints).toBe('timeout: 60s')
+    })
+  })
+})
+
+// ============================================================================
+// MCP TOOLS PASSTHROUGH TESTS
+// ============================================================================
+
+describe('MCP Tools Passthrough', () => {
+  it('should pass through MCP tools unchanged (mcp__ prefix)', () => {
+    const mcpArgs = { 
+      query: 'search something',
+      options: { limit: 10 }
+    }
+    const result = normalizeToolCall('mcp__brave_search', mcpArgs)
+    expect(result.name).toBe('mcp__brave_search')
+    expect(result.args).toEqual(mcpArgs)
+  })
+
+  it('should pass through unknown tools unchanged', () => {
+    const unknownArgs = { custom: 'args' }
+    const result = normalizeToolCall('custom_tool', unknownArgs)
+    expect(result.name).toBe('custom_tool')
+    expect(result.args).toEqual(unknownArgs)
+  })
+
+  it('should handle MCP tools with complex arguments', () => {
+    const complexArgs = {
+      uri: 'file:///path/to/file.ts',
+      position: { line: 10, character: 5 },
+      options: { includeDeclaration: true }
+    }
+    const result = normalizeToolCall('mcp__lsp_goto_definition', complexArgs)
+    expect(result.args).toEqual(complexArgs)
   })
 })

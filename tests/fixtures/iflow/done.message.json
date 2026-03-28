@@ -1,0 +1,5 @@
+{
+  "description": "Task finish/done message",
+  "type": "TASK_FINISH",
+  "stopReason": "complete"
+}

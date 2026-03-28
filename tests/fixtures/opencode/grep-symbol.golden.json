@@ -1,0 +1,12 @@
+{
+  "description": "Expected sequence for grep search",
+  "scenario": "User asks to find where IFlowClient is used",
+  "expectedSequence": [
+    { "type": "tool_call", "name": "grep" },
+    { "type": "content" }
+  ],
+  "notes": [
+    "Should use 'grep' tool",
+    "Should NOT list directory first unless needed"
+  ]
+}

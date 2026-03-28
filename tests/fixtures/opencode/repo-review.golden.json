@@ -1,0 +1,17 @@
+{
+  "description": "Expected sequence for repo review scenario",
+  "scenario": "User asks to review repository files",
+  "expectedSequence": [
+    { "type": "reasoning" },
+    { "type": "tool_call", "name": "list" },
+    { "type": "reasoning" },
+    { "type": "tool_call", "name": "read" },
+    { "type": "content" }
+  ],
+  "notes": [
+    "Should NOT respond with generic acknowledgment",
+    "Should explore before summarizing",
+    "Should use 'list' not 'bash ls'",
+    "Should use 'read' not 'bash cat'"
+  ]
+}

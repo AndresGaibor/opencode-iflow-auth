@@ -1,0 +1,29 @@
+{
+  "description": "Grep symbol request fixture",
+  "model": "glm-5",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Busca donde se usa IFlowClient"
+    }
+  ],
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "grep",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "pattern": { "type": "string" },
+            "path": { "type": "string" }
+          },
+          "required": ["pattern"]
+        }
+      }
+    }
+  ],
+  "stream": true,
+  "cwd": "/project",
+  "workspaceRoot": "/project"
+}

@@ -1,0 +1,30 @@
+{
+  "description": "Edit file request fixture",
+  "model": "glm-5",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Cambia foo por bar en src/index.ts"
+    }
+  ],
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "edit",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "filePath": { "type": "string" },
+            "oldString": { "type": "string" },
+            "newString": { "type": "string" }
+          },
+          "required": ["filePath", "oldString", "newString"]
+        }
+      }
+    }
+  ],
+  "stream": true,
+  "cwd": "/project",
+  "workspaceRoot": "/project"
+}

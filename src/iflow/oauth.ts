@@ -1,4 +1,11 @@
-import { IFLOW_CONSTANTS } from '../constants.js'
+import {
+  OAUTH_TOKEN_URL,
+  OAUTH_AUTHORIZE_URL,
+  USER_INFO_URL,
+  OAUTH_CLIENT_ID,
+  OAUTH_CLIENT_SECRET,
+  buildOAuthCallbackUrl
+} from '../constants/oauth.js'
 import { randomBytes } from 'node:crypto'
 
 export interface IFlowOAuthAuthorization {
@@ -26,17 +33,17 @@ function generateState(): string {
 
 export async function authorizeIFlowOAuth(port: number): Promise<IFlowOAuthAuthorization> {
   const state = generateState()
-  const redirectUri = `http://localhost:${port}/oauth2callback`
+  const redirectUri = buildOAuthCallbackUrl(port)
 
   const params = new URLSearchParams({
     loginMethod: 'phone',
     type: 'phone',
     redirect: redirectUri,
     state,
-    client_id: IFLOW_CONSTANTS.CLIENT_ID
+    client_id: OAUTH_CLIENT_ID
   })
 
-  const authUrl = `${IFLOW_CONSTANTS.OAUTH_AUTHORIZE_URL}?${params.toString()}`
+  const authUrl = `${OAUTH_AUTHORIZE_URL}?${params.toString()}`
 
   return { authUrl, state, redirectUri }
 }
@@ -49,15 +56,15 @@ export async function exchangeOAuthCode(
     grant_type: 'authorization_code',
     code,
     redirect_uri: redirectUri,
-    client_id: IFLOW_CONSTANTS.CLIENT_ID,
-    client_secret: IFLOW_CONSTANTS.CLIENT_SECRET
+    client_id: OAUTH_CLIENT_ID,
+    client_secret: OAUTH_CLIENT_SECRET
   })
 
   const basicAuth = Buffer.from(
-    `${IFLOW_CONSTANTS.CLIENT_ID}:${IFLOW_CONSTANTS.CLIENT_SECRET}`
+    `${OAUTH_CLIENT_ID}:${OAUTH_CLIENT_SECRET}`
   ).toString('base64')
 
-  const response = await fetch(IFLOW_CONSTANTS.OAUTH_TOKEN_URL, {
+  const response = await fetch(OAUTH_TOKEN_URL, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/x-www-form-urlencoded',
@@ -93,15 +100,15 @@ export async function refreshOAuthToken(refreshToken: string): Promise<IFlowOAut
   const params = new URLSearchParams({
     grant_type: 'refresh_token',
     refresh_token: refreshToken,
-    client_id: IFLOW_CONSTANTS.CLIENT_ID,
-    client_secret: IFLOW_CONSTANTS.CLIENT_SECRET
+    client_id: OAUTH_CLIENT_ID,
+    client_secret: OAUTH_CLIENT_SECRET
   })
 
   const basicAuth = Buffer.from(
-    `${IFLOW_CONSTANTS.CLIENT_ID}:${IFLOW_CONSTANTS.CLIENT_SECRET}`
+    `${OAUTH_CLIENT_ID}:${OAUTH_CLIENT_SECRET}`
   ).toString('base64')
 
-  const response = await fetch(IFLOW_CONSTANTS.OAUTH_TOKEN_URL, {
+  const response = await fetch(OAUTH_TOKEN_URL, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/x-www-form-urlencoded',
@@ -137,7 +144,7 @@ export async function fetchUserInfo(
   accessToken: string
 ): Promise<{ apiKey: string; email: string }> {
   const response = await fetch(
-    `${IFLOW_CONSTANTS.USER_INFO_URL}?accessToken=${encodeURIComponent(accessToken)}`,
+    `${USER_INFO_URL}?accessToken=${encodeURIComponent(accessToken)}`,
     {
       headers: {
         Accept: 'application/json'

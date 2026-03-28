@@ -5,20 +5,40 @@ import * as logger from '../../plugin/logger.js'
 
 export function checkIFlowCLI(): { installed: boolean; version?: string; error?: string } {
   try {
-    const configPath = getIFlowConfigPath()
-    const credsPath = getIFlowOAuthCredsPath()
-    
-    if (existsSync(configPath) || existsSync(credsPath)) {
-      log('iflow CLI config found at:', configPath)
-      return { installed: true, version: 'installed' }
+    // First: check if binary actually exists in PATH
+    let binPath = ''
+    try {
+      // Try Unix which, then Windows where
+      binPath = execSync('which iflow 2>/dev/null || where iflow 2>nul', { 
+        encoding: 'utf-8', 
+        stdio: ['pipe', 'pipe', 'pipe'] 
+      }).trim()
+    } catch {
+      // Binary not found in PATH
     }
     
-    execSync('where iflow 2>nul || which iflow 2>/dev/null', { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] })
-    log('iflow CLI executable found')
-    return { installed: true, version: 'installed' }
+    if (!binPath) {
+    log('iflow CLI binary not found in PATH')
+    return { installed: false, error: 'iflow CLI binary not found. Install with: npm install -g @anthropic-ai/iflow-cli' }
+  }
+    
+    // Second: verify it's executable and get version
+    let version = 'unknown'
+    try {
+    version = execSync('iflow --version 2>/dev/null', { 
+      encoding: 'utf-8', 
+      stdio: ['pipe', 'pipe', 'pipe'] 
+    }).trim() || 'unknown'
+  } catch {
+    // Version command failed, but binary exists
+    version = 'installed'
+  }
+  
+  log('iflow CLI found at:', binPath, 'version:', version)
+  return { installed: true, version }
   } catch (error: any) {
-    log('iflow CLI check failed:', error.message)
-    return { installed: false, error: 'iflow CLI not found' }
+  log('iflow CLI check failed:', error.message)
+  return { installed: false, error: 'iflow CLI not found' }
   }
 }
 
@@ -59,20 +79,20 @@ export async function triggerIFlowLogin(): Promise<{ success: boolean; error?: s
     const loginProcess = spawn('iflow', ['login'], {
       shell: true,
       stdio: 'inherit'
-    })
+  })
     
     loginProcess.on('close', (code) => {
-      if (code === 0) {
-        log('iflow login successful')
-        resolve({ success: true })
-      } else {
-        resolve({ success: false, error: `Login process exited with code ${code}` })
-      }
-    })
-    
-    loginProcess.on('error', (err) => {
-      resolve({ success: false, error: err.message })
-    })
+    if (code === 0) {
+      log('iflow login successful')
+      resolve({ success: true })
+    } else {
+      resolve({ success: false, error: `Login process exited with code ${code}` })
+    }
+  })
+  
+  loginProcess.on('error', (err) => {
+    resolve({ success: false, error: err.message })
+  })
   })
 }
 

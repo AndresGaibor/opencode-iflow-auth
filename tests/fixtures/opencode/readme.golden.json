@@ -1,0 +1,12 @@
+{
+  "description": "Expected sequence for reading README",
+  "scenario": "User asks to read README.md",
+  "expectedSequence": [
+    { "type": "tool_call", "name": "read" },
+    { "type": "content" }
+  ],
+  "notes": [
+    "Should use 'read' tool",
+    "Should NOT use 'bash cat'"
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "description": "Permission request message (should be blocked)",
+  "type": "PERMISSION_REQUEST",
+  "requestId": "perm-123",
+  "options": [
+    { "optionId": "allow", "label": "Allow", "type": "allow" },
+    { "optionId": "deny", "label": "Deny", "type": "deny" }
+  ]
+}

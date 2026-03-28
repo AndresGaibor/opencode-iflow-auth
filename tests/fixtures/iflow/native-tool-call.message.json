@@ -1,0 +1,8 @@
+{
+  "description": "Native ACP tool call message",
+  "type": "tool_call",
+  "toolName": "read_text_file",
+  "args": {
+    "path": "README.md"
+  }
+}

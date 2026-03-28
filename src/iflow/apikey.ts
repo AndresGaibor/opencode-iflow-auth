@@ -1,4 +1,4 @@
-import { IFLOW_CONSTANTS } from '../constants.js'
+import { API_BASE_URL, USER_AGENT } from '../constants/api.js'
 import { fetchModelsFromAPI, type IFlowModelInfo } from './models.js'
 
 export interface IFlowApiKeyResult {
@@ -9,10 +9,10 @@ export interface IFlowApiKeyResult {
 }
 
 export async function validateApiKey(apiKey: string): Promise<IFlowApiKeyResult> {
-  const response = await fetch(`${IFLOW_CONSTANTS.BASE_URL}/models`, {
+  const response = await fetch(`${API_BASE_URL}/models`, {
     headers: {
       Authorization: `Bearer ${apiKey}`,
-      'User-Agent': IFLOW_CONSTANTS.USER_AGENT
+      'User-Agent': USER_AGENT
     }
   })
 
