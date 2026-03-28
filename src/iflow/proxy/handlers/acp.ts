@@ -9,9 +9,29 @@ import type {
   SessionState, 
   NormalizedToolCall,
 } from '../types.js'
-import fs from 'fs'
-import path from 'path'
-import os from 'os'
+
+// Import structured debug logger
+import {
+  LOG_DIR,
+  LOG_FILES,
+  ensureLogDir,
+  logProxy,
+  logOpenAIRequest,
+  logIFlowInbound,
+  logIFlowOutbound,
+  logToolCallEmitted,
+  logToolResultReceived,
+  logSession,
+  logProcessingResult,
+  logError,
+  buildToolContractMap,
+  validateToolCallContract,
+  generateTurnId,
+  type ToolContractMap,
+} from '../debug-logger.js'
+
+// Import OpenCode tools for hardcoded schemas
+import { getEffectiveTools, buildToolSchemaMap } from '../opencode-tools.js'
 
 // Import pure functions from acp-utils.ts
 import {
@@ -53,22 +73,8 @@ export {
   SESSION_TTL_MS,
 }
 
-// User requested debug logs in ~/.config/opencode/iflow-logs
-const LOG_DIR = path.join(os.homedir(), '.config', 'opencode', 'iflow-logs')
-if (!fs.existsSync(LOG_DIR)) {
-  fs.mkdirSync(LOG_DIR, { recursive: true })
-}
-const ACP_LOG_FILE = path.join(LOG_DIR, 'acp-proxy.log')
-
-function fileLog(message: string) {
-  const timestamp = new Date().toISOString()
-  const line = `[${timestamp}] ${message}\n`
-  try {
-    fs.appendFileSync(ACP_LOG_FILE, line)
-  } catch (e) {
-    console.error('Failed to write to acp-proxy.log', e)
-  }
-}
+// Ensure log directory exists on module load
+ensureLogDir()
 
 // ============================================================================
 // SESSION STORE
@@ -84,7 +90,12 @@ function cleanupExpiredSessions(): void {
         session.client?.disconnect?.()
       } catch {}
       acpSessions.delete(key)
-      fileLog(`[SESSION CLEANUP] Removed expired session: ${key.substring(0, 8)}...`)
+      logSession({
+        sessionKey: key,
+        model: session.model,
+        action: 'expired',
+      })
+      logProxy(`[SESSION CLEANUP] Removed expired session: ${key.substring(0, 8)}...`)
     }
   }
 }
@@ -123,20 +134,35 @@ async function getOrCreateSession({
   model,
   tools,
   conversation,
+  turnId,
 }: {
   sessionKey: string
   model: string
   tools: any[]
   conversation: ReturnType<typeof buildConversationContext>
+  turnId: string
 }): Promise<SessionState> {
   const existing = acpSessions.get(sessionKey)
   if (existing && existing.client?.isConnected?.()) {
     existing.lastActivityAt = Date.now()
-    fileLog(`[SESSION] Reusing session: ${sessionKey.substring(0, 8)}... model=${model}`)
+    logSession({
+      sessionKey,
+      model,
+      action: 'reused',
+      turnId,
+      toolSchemaHash: existing.toolSchemaHash,
+    })
+    logProxy(`[SESSION] Reusing session: ${sessionKey.substring(0, 8)}... model=${model}`)
     return existing
   }
 
-  fileLog(`[SESSION] Creating new session: ${sessionKey.substring(0, 8)}... model=${model}`)
+  logSession({
+    sessionKey,
+    model,
+    action: 'created',
+    turnId,
+  })
+  logProxy(`[SESSION] Creating new session: ${sessionKey.substring(0, 8)}... model=${model}`)
   
   const compatPrompt = buildOpenCodeCompatPrompt(tools)
   
@@ -155,7 +181,14 @@ async function getOrCreateSession({
   try {
     await client.config.set('model', model)
   } catch (err) {
-    fileLog(`[SESSION] Warning: Could not set model: ${err}`)
+    logError({
+      sessionKey,
+      turnId,
+      model,
+      errorType: 'other',
+      message: `Could not set model: ${err}`,
+    })
+    logProxy(`[SESSION] Warning: Could not set model: ${err}`)
   }
 
   const session: SessionState = {
@@ -169,7 +202,7 @@ async function getOrCreateSession({
   }
 
   acpSessions.set(sessionKey, session)
-  fileLog(`[SESSION] Session created and stored: ${sessionKey.substring(0, 8)}...`)
+  logProxy(`[SESSION] Session created and stored: ${sessionKey.substring(0, 8)}...`)
   
   return session
 }
@@ -187,12 +220,12 @@ async function initializeSessionIfNeeded({
   const systemBlock = conversation.systemMessages.join('\n\n')
   
   if (systemBlock.trim()) {
-    fileLog(`[SESSION INIT] Injecting system context (${systemBlock.length} chars)`)
+    logProxy(`[SESSION INIT] Injecting system context (${systemBlock.length} chars)`)
     // System messages are already included via append_system_prompt in session settings
   }
 
   session.initialized = true
-  fileLog(`[SESSION INIT] Session initialized: ${session.sessionKey.substring(0, 8)}...`)
+  logProxy(`[SESSION INIT] Session initialized: ${session.sessionKey.substring(0, 8)}...`)
 }
 
 // ============================================================================
@@ -231,7 +264,62 @@ function emitContentChunk(res: ServerResponse, chatId: string, created: number, 
   res.write(`data: ${JSON.stringify(chunk)}\n\n`)
 }
 
-function emitToolCallChunk(res: ServerResponse, chatId: string, created: number, model: string, toolCall: NormalizedToolCall) {
+function emitToolCallChunk(
+  res: ServerResponse, 
+  chatId: string, 
+  created: number, 
+  model: string, 
+  toolCall: NormalizedToolCall,
+  // Logging context
+  logContext: {
+    sessionKey: string
+    turnId: string
+    originalToolCall?: { name: string; args: any }
+    source: 'native_acp' | 'textual_fallback' | 'unknown'
+    contractMap?: ToolContractMap
+  }
+) {
+  const { sessionKey, turnId, originalToolCall, source, contractMap } = logContext
+  
+  // Validate against contract before emitting
+  if (contractMap) {
+    const validation = validateToolCallContract({
+      toolName: toolCall.name,
+      args: toolCall.args,
+      contractMap,
+      sessionKey,
+      turnId,
+      model,
+    })
+    if (!validation.valid) {
+      logError({
+        sessionKey,
+        turnId,
+        model,
+        errorType: 'contract_mismatch',
+        message: `Tool '${toolCall.name}' contract validation failed`,
+        details: {
+          issues: validation.issues,
+          normalizedArgs: toolCall.args,
+        },
+      })
+    }
+  }
+  
+  // Log tool call emission
+  logToolCallEmitted({
+    sessionKey,
+    turnId,
+    model,
+    chatId,
+    originalToolCall,
+    normalizedToolCall: toolCall,
+    source,
+    finishReason: 'tool_calls',
+  })
+  
+  logProxy(`[TOOL CALL] ${toolCall.name} -> ${JSON.stringify(toolCall.args)}`)
+  
   const openAIToolCall = {
     index: 0,
     id: `call_${randomUUID()}`,
@@ -293,16 +381,37 @@ export async function handleACPStreamRequest(
     'Connection': 'keep-alive'
   })
 
+  // Generate unique IDs for this turn
   const chatId = `iflow-${randomUUID()}`
+  const turnId = generateTurnId()
   const created = Math.floor(Date.now() / 1000)
   const model = request.model
-  const tools = request.tools || []
+  const requestTools = request.tools || []
 
   // Build session key from conversation context
   const sessionKey = makeSessionKey(request)
   const conversation = buildConversationContext(request)
+  
+  // Use effective tools (hardcoded if request doesn't include them)
+  const effectiveTools = getEffectiveTools(requestTools)
+  
+  // Build contract map from effective tools for validation
+  const contractMap = buildToolSchemaMap(effectiveTools)
 
-  fileLog(`[REQ] sessionKey=${sessionKey.substring(0, 8)}... model=${model} msgCount=${request.messages.length}`)
+  // Log OpenCode request received (full request with tools schema)
+  logOpenAIRequest({
+    sessionKey,
+    turnId,
+    model,
+    request: {
+      model: request.model,
+      stream: request.stream,
+      messages: request.messages,
+      tools: request.tools,
+    },
+  })
+  
+  logProxy(`[REQ] sessionKey=${sessionKey.substring(0, 8)}... turnId=${turnId} model=${model} msgCount=${request.messages.length} toolCount=${requestTools.length} effectiveToolCount=${effectiveTools.length}`)
 
   // Get or create session
   let session: SessionState
@@ -310,11 +419,20 @@ export async function handleACPStreamRequest(
     session = await getOrCreateSession({
       sessionKey,
       model,
-      tools,
+      tools: effectiveTools,
       conversation,
+      turnId,
     })
   } catch (error: any) {
-    fileLog(`[ERROR] Failed to create session: ${error.message}`)
+    logError({
+      sessionKey,
+      turnId,
+      model,
+      errorType: 'exception',
+      message: `Failed to create session: ${error.message}`,
+      details: { stack: error.stack },
+    })
+    logProxy(`[ERROR] Failed to create session: ${error.message}`)
     emitFinalDoneChunk(res, chatId, created, model)
     return
   }
@@ -328,7 +446,38 @@ export async function handleACPStreamRequest(
   // Build turn prompt
   const turnPrompt = buildTurnPrompt({ conversation, requestBody: request })
   
-  fileLog(`[TURN] Sending: ${turnPrompt.substring(0, 150)}...`)
+  // Log tool result if present
+  if (conversation.latestToolResult) {
+    logToolResultReceived({
+      sessionKey,
+      turnId,
+      model,
+      toolName: conversation.latestToolResult.name,
+      output: conversation.latestToolResult.content,
+      outputLength: conversation.latestToolResult.content?.length || 0,
+      formattedPrompt: formatToolResultForIFlow({
+        toolName: conversation.latestToolResult.name,
+        args: conversation.latestToolResult.args || {},
+        output: conversation.latestToolResult.content,
+      }),
+    })
+  }
+  
+  // Log prompt sent to iFlow
+  logIFlowOutbound({
+    sessionKey,
+    turnId,
+    model,
+    prompt: turnPrompt,
+    hasAppendSystemPrompt: true,
+    context: {
+      systemMessagesCount: conversation.systemMessages.length,
+      hasLatestToolResult: !!conversation.latestToolResult,
+      hasLatestUserMessage: !!conversation.latestUserMessage,
+    },
+  })
+  
+  logProxy(`[TURN] Sending: ${turnPrompt.substring(0, 150)}...`)
   if (enableLog) logger.log(`[IFlowACP] Sending: ${turnPrompt.substring(0, 100)}...`)
 
   // State for streaming
@@ -342,10 +491,40 @@ export async function handleACPStreamRequest(
   try {
     await session.client.sendMessage(turnPrompt)
 
-    for await (const message of session.client.receiveMessages()) {
+    for await (const rawMessage of session.client.receiveMessages()) {
       if (state.finished) break
+      
+      // Cast to any to handle various message structures from iFlow SDK
+      const message = rawMessage as any
+
+      // Log raw iFlow message BEFORE processing
+      logIFlowInbound({
+        sessionKey,
+        turnId,
+        model,
+        message,
+        rawType: message?.type || message?.messageType || typeof message,
+      })
 
       const result = processACPMessage(message)
+      
+      // Determine source of tool call
+      let toolCallSource: 'native_acp' | 'textual_fallback' | 'unknown' = 'unknown'
+      if (result.type === 'tool_call') {
+        toolCallSource = extractNativeACPToolCall(message) ? 'native_acp' : 'textual_fallback'
+      }
+      
+      // Log processing result
+      logProcessingResult({
+        sessionKey,
+        turnId,
+        model,
+        resultType: result.type,
+        source: toolCallSource !== 'unknown' ? toolCallSource : undefined,
+        toolName: result.type === 'tool_call' ? result.toolCall.name : undefined,
+        contentLength: result.type === 'content' ? result.content.length : undefined,
+        hasReasoning: !!result.reasoning,
+      })
 
       // Emit reasoning if present
       if (result.reasoning) {
@@ -355,8 +534,13 @@ export async function handleACPStreamRequest(
 
       switch (result.type) {
         case 'tool_call':
-          fileLog(`[TOOL CALL] ${result.toolCall.name} -> ${JSON.stringify(result.toolCall.args)}`)
-          emitToolCallChunk(res, chatId, created, model, result.toolCall)
+          emitToolCallChunk(res, chatId, created, model, result.toolCall, {
+            sessionKey,
+            turnId,
+            originalToolCall: extractNativeACPToolCall(message) || extractToolCallFromText(extractACPText(message)) || undefined,
+            source: toolCallSource,
+            contractMap,
+          })
           state.emittedToolCall = true
           state.finished = true
           return // Stop processing - OpenCode will execute the tool
@@ -393,7 +577,15 @@ export async function handleACPStreamRequest(
           } else if (message.type === MessageType.PERMISSION_REQUEST) {
             // Block internal tool execution - delegate to OpenCode
             const permMsg = message as any
-            fileLog(`[PERMISSION] Blocking: ${JSON.stringify(permMsg)}`)
+            logError({
+              sessionKey,
+              turnId,
+              model,
+              errorType: 'permission_blocked',
+              message: `Blocking internal tool: ${JSON.stringify(permMsg.toolName || permMsg)}`,
+              details: { permissionRequest: permMsg },
+            })
+            logProxy(`[PERMISSION] Blocking: ${JSON.stringify(permMsg)}`)
             
             if (permMsg.options && permMsg.options.length > 0) {
               const denyOption = permMsg.options.find(
@@ -405,7 +597,15 @@ export async function handleACPStreamRequest(
             }
           } else if (message.type === MessageType.ERROR) {
             const errorMsg = message as any
-            fileLog(`[ERROR] ACP Error: ${errorMsg.message}`)
+            logError({
+              sessionKey,
+              turnId,
+              model,
+              errorType: 'other',
+              message: `ACP Error: ${errorMsg.message}`,
+              details: { error: errorMsg },
+            })
+            logProxy(`[ERROR] ACP Error: ${errorMsg.message}`)
           }
           break
       }
@@ -413,12 +613,20 @@ export async function handleACPStreamRequest(
 
     // Natural finish
     if (!state.emittedToolCall) {
-      fileLog(`[STREAM END] Natural finish, content length: ${state.contentBuffer.length}`)
+      logProxy(`[STREAM END] Natural finish, content length: ${state.contentBuffer.length}`)
       emitFinalDoneChunk(res, chatId, created, model)
     }
 
   } catch (error: any) {
-    fileLog(`[EXCEPTION] ${error.message}`)
+    logError({
+      sessionKey,
+      turnId,
+      model,
+      errorType: 'exception',
+      message: error.message,
+      details: { stack: error.stack },
+    })
+    logProxy(`[EXCEPTION] ${error.message}`)
     
     if (!state.emittedToolCall) {
       const errorChunk: StreamChunk = {
@@ -444,8 +652,13 @@ export async function handleACPStreamRequest(
 // ============================================================================
 
 export async function cleanupACPClients(): Promise<void> {
-  fileLog(`[CLEANUP] Cleaning up ${acpSessions.size} sessions`)
+  logProxy(`[CLEANUP] Cleaning up ${acpSessions.size} sessions`)
   for (const [key, session] of acpSessions) {
+    logSession({
+      sessionKey: key,
+      model: session.model,
+      action: 'cleaned',
+    })
     try {
       await session.client.disconnect()
     } catch (err) {}

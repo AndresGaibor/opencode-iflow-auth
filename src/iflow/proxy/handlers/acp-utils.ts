@@ -10,6 +10,7 @@ import type {
   NormalizedToolCall,
   ACPProcessingResult 
 } from '../types.js'
+import { OPENCODE_TOOLS, getEffectiveTools, buildToolSchemaMap } from '../opencode-tools.js'
 
 // ============================================================================
 // HASH UTILITIES
@@ -135,12 +136,16 @@ export function buildConversationContext(requestBody: ChatCompletionRequest): Co
 
 /**
  * Builds the OpenCode compatibility system prompt.
+ * Uses hardcoded tool definitions when request doesn't include tools.
  */
 export function buildOpenCodeCompatPrompt(
   tools: any[],
   ctx?: { cwd?: string; workspaceRoot?: string }
 ): string {
-  const toolDefs = tools
+  // Use hardcoded tools if request doesn't include them
+  const effectiveTools = getEffectiveTools(tools)
+  
+  const toolDefs = effectiveTools
     .map((t: any) => {
       const fn = t.function || t
       const params = fn.parameters?.properties || {}
@@ -287,8 +292,9 @@ export function normalizeToolCall(name: string, args: any): NormalizedToolCall {
   
   switch (mappedName) {
     case 'read':
-      // OpenCode read: { path, offset?, limit? }
-      cleanedArgs.path = mappedArgs.path || mappedArgs.filePath || mappedArgs.file || mappedArgs.filename || ''
+      // OpenCode read: { filePath, offset?, limit? }
+      // Note: OpenCode schema requires 'filePath', not 'path'
+      cleanedArgs.filePath = mappedArgs.filePath || mappedArgs.path || mappedArgs.file || mappedArgs.filename || ''
       if (mappedArgs.offset !== undefined) cleanedArgs.offset = mappedArgs.offset
       if (mappedArgs.limit !== undefined) cleanedArgs.limit = mappedArgs.limit
       break

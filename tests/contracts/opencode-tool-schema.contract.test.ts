@@ -11,26 +11,26 @@ import { normalizeToolCall } from '../../src/iflow/proxy/handlers/acp-utils.js'
 // ============================================================================
 
 describe('Contract: read tool', () => {
-  it('should have "path" field, not "filePath"', () => {
-    const result = normalizeToolCall('read_text_file', { filePath: 'test.ts' })
-    expect(result.args.path).toBeDefined()
-    expect(result.args.filePath).toBeUndefined()
+  it('should have "filePath" field, not "path"', () => {
+    const result = normalizeToolCall('read_text_file', { path: 'test.ts' })
+    expect(result.args.filePath).toBeDefined()
+    expect(result.args.path).toBeUndefined()
   })
 
   it('should have optional offset and limit fields', () => {
     const result = normalizeToolCall('read', { 
-      path: 'test.ts', 
+      filePath: 'test.ts', 
       offset: 100, 
       limit: 50 
     })
-    expect(result.args.path).toBe('test.ts')
+    expect(result.args.filePath).toBe('test.ts')
     expect(result.args.offset).toBe(100)
     expect(result.args.limit).toBe(50)
   })
 
-  it('should work with minimal args (only path)', () => {
-    const result = normalizeToolCall('read', { path: 'README.md' })
-    expect(result.args.path).toBe('README.md')
+  it('should work with minimal args (only filePath)', () => {
+    const result = normalizeToolCall('read', { filePath: 'README.md' })
+    expect(result.args.filePath).toBe('README.md')
     expect(result.args.offset).toBeUndefined()
     expect(result.args.limit).toBeUndefined()
   })

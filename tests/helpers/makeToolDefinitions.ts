@@ -38,10 +38,10 @@ function makeTool(name: string, description: string, properties: Record<string, 
  */
 export function makeReadTool(): ToolDefinition {
   return makeTool('read', 'Read file contents', {
-    path: { type: 'string', description: 'File path to read' },
+    filePath: { type: 'string', description: 'File path to read' },
     offset: { type: 'number', description: 'Start line (optional)' },
     limit: { type: 'number', description: 'Max lines to read (optional)' },
-  }, ['path'])
+  }, ['filePath'])
 }
 
 /**

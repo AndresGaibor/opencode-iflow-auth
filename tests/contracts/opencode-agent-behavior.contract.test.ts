@@ -147,7 +147,7 @@ describe('Behavior: Tool priority', () => {
     expect(result.type).toBe('tool_call')
     if (result.type === 'tool_call') {
       expect(result.toolCall.name).toBe('read')
-      expect(result.toolCall.args.path).toBe('real.ts')
+      expect(result.toolCall.args.filePath).toBe('real.ts')
     }
   })
 

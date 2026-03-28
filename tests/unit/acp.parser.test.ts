@@ -290,7 +290,7 @@ describe('processACPMessage', () => {
     
     expect(result.type).toBe('tool_call')
     expect(result.toolCall!.name).toBe('read') // Normalized
-    expect(result.toolCall!.args.path).toBe('test.ts')
+    expect(result.toolCall!.args.filePath).toBe('test.ts')
   })
 
   it('should process fallback textual tool call', () => {
@@ -362,7 +362,7 @@ describe('processACPMessage', () => {
     
     expect(result.type).toBe('tool_call')
     expect(result.toolCall!.name).toBe('read') // Native, not write
-    expect(result.toolCall!.args.path).toBe('real.ts')
+    expect(result.toolCall!.args.filePath).toBe('real.ts')
   })
 
   it('should normalize tool calls', () => {

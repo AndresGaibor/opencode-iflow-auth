@@ -68,16 +68,20 @@ function matchesPattern(
 describe('Golden: Repo Review', () => {
   it('should match expected sequence pattern', () => {
     const expected = repoReviewGolden.expectedSequence as { type: string; name?: string }[]
-    
-    // Simulate a typical repo review flow
+
+    // Simulate a typical repo review flow with full sequence
     const messages = [
       { type: 'thinking', chunk: { thought: 'Exploring repo...' } },
       { toolName: 'list_directory', args: { directory: '.' } },
+      { type: 'thinking', chunk: { thought: 'Reading files...' } },
+      { toolName: 'read_text_file', args: { path: 'src/index.ts' } },
+      { type: 'content', chunk: { text: 'Here is the repo structure...' } },
     ]
-    
+
     const actual = processSequence(messages)
-    
-    // First two items should match
+
+    // Check that actual matches the expected pattern length
+    expect(actual.length).toBe(expected.length)
     expect(matchesPattern(actual, expected)).toBe(true)
   })
 
@@ -114,13 +118,15 @@ describe('Golden: Repo Review', () => {
 describe('Golden: Read README', () => {
   it('should match expected sequence pattern', () => {
     const expected = readmeGolden.expectedSequence as { type: string; name?: string }[]
-    
+
     const messages = [
       { toolName: 'read_text_file', args: { path: 'README.md' } },
+      { type: 'content', chunk: { text: 'Here is the README content...' } },
     ]
-    
+
     const actual = processSequence(messages)
-    
+
+    expect(actual.length).toBe(expected.length)
     expect(matchesPattern(actual, expected)).toBe(true)
   })
 
@@ -146,13 +152,15 @@ describe('Golden: Read README', () => {
 describe('Golden: Grep Symbol', () => {
   it('should match expected sequence pattern', () => {
     const expected = grepSymbolGolden.expectedSequence as { type: string; name?: string }[]
-    
+
     const messages = [
       { toolName: 'search_files', args: { pattern: 'IFlowClient' } },
+      { type: 'content', chunk: { text: 'Found IFlowClient in these files...' } },
     ]
-    
+
     const actual = processSequence(messages)
-    
+
+    expect(actual.length).toBe(expected.length)
     expect(matchesPattern(actual, expected)).toBe(true)
   })
 
@@ -174,18 +182,20 @@ describe('Golden: Grep Symbol', () => {
 describe('Golden: Edit File', () => {
   it('should match expected sequence pattern', () => {
     const expected = editGolden.expectedSequence as { type: string; name?: string }[]
-    
+
     const messages = [
       { type: 'thinking', chunk: { thought: 'Preparing edit...' } },
-      { toolName: 'edit_file', args: { 
-        filePath: 'src/index.ts', 
-        oldString: 'foo', 
-        newString: 'bar' 
+      { toolName: 'edit_file', args: {
+        filePath: 'src/index.ts',
+        oldString: 'foo',
+        newString: 'bar'
       }},
+      { type: 'content', chunk: { text: 'File updated successfully.' } },
     ]
-    
+
     const actual = processSequence(messages)
-    
+
+    expect(actual.length).toBe(expected.length)
     expect(matchesPattern(actual, expected)).toBe(true)
   })
 

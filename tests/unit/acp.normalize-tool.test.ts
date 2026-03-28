@@ -14,30 +14,30 @@ describe('normalizeToolCall - read tool', () => {
   it('should normalize read_text_file to read', () => {
     const result = normalizeToolCall('read_text_file', { path: 'src/index.ts' })
     expect(result.name).toBe('read')
-    expect(result.args.path).toBe('src/index.ts')
+    expect(result.args.filePath).toBe('src/index.ts')
   })
 
   it('should normalize read_file to read', () => {
     const result = normalizeToolCall('read_file', { filePath: 'src/file.ts' })
     expect(result.name).toBe('read')
-    expect(result.args.path).toBe('src/file.ts')
+    expect(result.args.filePath).toBe('src/file.ts')
   })
 
   it('should normalize cat to read', () => {
     const result = normalizeToolCall('cat', { file: 'README.md' })
     expect(result.name).toBe('read')
-    expect(result.args.path).toBe('README.md')
+    expect(result.args.filePath).toBe('README.md')
   })
 
   it('should normalize getFile to read', () => {
     const result = normalizeToolCall('getFile', { filename: 'config.json' })
     expect(result.name).toBe('read')
-    expect(result.args.path).toBe('config.json')
+    expect(result.args.filePath).toBe('config.json')
   })
 
   it('should preserve offset and limit', () => {
     const result = normalizeToolCall('read', { 
-      path: 'large-file.ts',
+      filePath: 'large-file.ts',
       offset: 100,
       limit: 50
     })
@@ -46,16 +46,16 @@ describe('normalizeToolCall - read tool', () => {
     expect(result.args.limit).toBe(50)
   })
 
-  it('should map filePath to path for read tool', () => {
-    const result = normalizeToolCall('read', { filePath: 'src/file.ts' })
-    expect(result.args.path).toBe('src/file.ts')
-    expect(result.args.filePath).toBeUndefined()
+  it('should map path to filePath for read tool', () => {
+    const result = normalizeToolCall('read', { path: 'src/file.ts' })
+    expect(result.args.filePath).toBe('src/file.ts')
+    expect(result.args.path).toBeUndefined()
   })
 
-  it('should use "path" not "filePath" in output', () => {
-    const result = normalizeToolCall('read_text_file', { filePath: 'test.ts' })
-    expect(result.args.path).toBeDefined()
-    expect(result.args.filePath).toBeUndefined()
+  it('should use "filePath" not "path" in output', () => {
+    const result = normalizeToolCall('read_text_file', { path: 'test.ts' })
+    expect(result.args.filePath).toBeDefined()
+    expect(result.args.path).toBeUndefined()
   })
 })
 
@@ -582,13 +582,13 @@ describe('normalizeToolCall - edge cases', () => {
   it('should handle null args', () => {
     const result = normalizeToolCall('read', null)
     expect(result.name).toBe('read')
-    expect(result.args.path).toBe('')
+    expect(result.args.filePath).toBe('')
   })
 
   it('should handle undefined args', () => {
     const result = normalizeToolCall('read', undefined)
     expect(result.name).toBe('read')
-    expect(result.args.path).toBe('')
+    expect(result.args.filePath).toBe('')
   })
 
   it('should handle tool name with whitespace', () => {
@@ -609,6 +609,6 @@ describe('normalizeToolCall - edge cases', () => {
       extraField: 'should be preserved for unknown tools'
     })
     // For read tool, only specific fields are extracted
-    expect(result.args.path).toBe('test.ts')
+    expect(result.args.filePath).toBe('test.ts')
   })
 })
